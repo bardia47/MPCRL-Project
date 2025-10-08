@@ -1,0 +1,36 @@
+# ===== Core scientific stack =====
+numpy>=1.26.0
+scipy>=1.12.0
+pandas>=2.2.0
+matplotlib>=3.8.0
+torch>=2.2.0
+torchvision>=0.17.0
+tqdm>=4.66.0
+
+# ===== Reinforcement learning / environment libraries =====
+gymnasium>=0.29.0
+highway-env>=1.8.2
+stable-baselines3[extra]>=2.3.2
+dm-control>=1.0.16
+mujoco>=3.1.3
+gymnasium-robotics>=1.4.0
+dm_env>=1.6
+
+# ===== Hydra & config system (used by TDMPC2) =====
+hydra-core>=1.3.2
+omegaconf>=2.3.0
+
+# ===== Visualization & logging =====
+tensorboard>=2.16.0
+opencv-python>=4.10.0
+imageio>=2.34.0
+pyyaml>=6.0.1
+
+# ===== Utility and experiment management =====
+seaborn>=0.13.0
+termcolor>=2.4.0
+rich>=13.7.0
+wandb>=0.17.0  # optional experiment tracking (used in many RL repos)
+
+# ===== Optional / testing =====
+pytest>=8.0.0
