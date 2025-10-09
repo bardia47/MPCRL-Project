@@ -16,17 +16,17 @@ TOTAL_STEPS       = 200_000
 RANDOM_STEPS      = 5_000        # pure random
 USE_MPC_UNTIL     = 50_000       # after this, switch to actor for speed
 UPDATES_START     = 1_000
-UPDATES_PER_STEP  = 2
-BATCH_SIZE        = 128
+UPDATES_PER_STEP  = 10
+BATCH_SIZE        = 512
 LOG_EVERY         = 1_000        # still print each 1k, but we log EVERY step/episode to file
 SAVE_EVERY        = 5_000
 EVAL_EVERY        = 10_000       # run an MPC eval episode
 PLOT_AT_END       = True         # make summary plots on finish
 
 # ---------- Light CEM params (faster) ----------
-CEM_HORIZON   = 6
-CEM_POP       = 64
-CEM_ITERS     = 3
+CEM_HORIZON = 15
+CEM_POP     = 128
+CEM_ITERS   = 4
 CEM_ELITE_FR  = 0.1
 CEM_DISCOUNT  = 0.99
 
@@ -255,7 +255,7 @@ def main():
     print("Device:", device)
 
     agent = TD_MPC2_Agent(obs_dim, act_dim, device=device)
-    buffer = ReplayBuffer(obs_dim, act_dim)
+    buffer = ReplayBuffer(obs_dim, act_dim, device=device)
     start_step = load_latest_checkpoint(agent)
 
     o, _ = env.reset()

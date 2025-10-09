@@ -3,17 +3,29 @@ import numpy as np
 import torch
 
 class ReplayBuffer:
-    def __init__(self, obs_dim, act_dim, size=int(1e6)):
+    def __init__(self, obs_dim, act_dim,device,size=int(1e6)):
         self.ptr, self.size, self.full = 0, size, False
-        self.obs = np.zeros((size, obs_dim), np.float32)
-        self.next = np.zeros((size, obs_dim), np.float32)
-        self.act = np.zeros((size, act_dim), np.float32)
-        self.rew = np.zeros((size, 1), np.float32)
-        self.done = np.zeros((size, 1), np.float32)
+        self.device = device
+        self.obs = torch.zeros((size, obs_dim), dtype=torch.float32, device=device)
+        self.next = torch.zeros((size, obs_dim), dtype=torch.float32, device=device)
+        self.act = torch.zeros((size, act_dim), dtype=torch.float32, device=device)
+        self.rew = torch.zeros((size, 1), dtype=torch.float32, device=device)
+        self.done = torch.zeros((size, 1), dtype=torch.float32, device=device)
 
     def add(self, o, a, r, d, o2):
+        if isinstance(o, np.ndarray):
+            o = torch.tensor(o, dtype=torch.float32, device=self.device)
+            a = torch.tensor(a, dtype=torch.float32, device=self.device)
+            r = torch.tensor([r], dtype=torch.float32, device=self.device)
+            d = torch.tensor([d], dtype=torch.float32, device=self.device)
+            o2 = torch.tensor(o2, dtype=torch.float32, device=self.device)
+
         i = self.ptr
-        self.obs[i], self.act[i], self.rew[i], self.done[i], self.next[i] = o, a, r, d, o2
+        self.obs[i] = o
+        self.act[i] = a
+        self.rew[i] = r
+        self.done[i] = d
+        self.next[i] = o2
         self.ptr = (self.ptr + 1) % self.size
         self.full = self.full or self.ptr == 0
 
@@ -21,9 +33,10 @@ class ReplayBuffer:
         maxidx = self.size if self.full else self.ptr
         idx = np.random.randint(0, maxidx, size=batch)
         return (
-            torch.tensor(self.obs[idx]),
-            torch.tensor(self.act[idx]),
-            torch.tensor(self.rew[idx]),
-            torch.tensor(self.done[idx]),
-            torch.tensor(self.next[idx]),
+            torch.from_numpy(self.obs[idx]),
+            torch.from_numpy(self.act[idx]),
+            torch.from_numpy(self.rew[idx]),
+            torch.from_numpy(self.done[idx]),
+            torch.from_numpy(self.next[idx]),
         )
+
