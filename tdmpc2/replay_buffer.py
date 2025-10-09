@@ -29,14 +29,20 @@ class ReplayBuffer:
         self.ptr = (self.ptr + 1) % self.size
         self.full = self.full or self.ptr == 0
 
-    def sample(self, batch):
+    def sample(self, batch_size, non_blocking=True):
         maxidx = self.size if self.full else self.ptr
-        idx = np.random.randint(0, maxidx, size=batch)
-        return (
-            torch.from_numpy(self.obs[idx]),
-            torch.from_numpy(self.act[idx]),
-            torch.from_numpy(self.rew[idx]),
-            torch.from_numpy(self.done[idx]),
-            torch.from_numpy(self.next[idx]),
-        )
+        idx = torch.randint(0, maxidx, (batch_size,), device=self.device)
+        obs = self.obs[idx]
+        act = self.act[idx]
+        rew = self.rew[idx]
+        done = self.done[idx]
+        nxt = self.next[idx]
+
+        obs = obs.to(self.device, non_blocking=non_blocking)
+        act = act.to(self.device, non_blocking=non_blocking)
+        rew = rew.to(self.device, non_blocking=non_blocking)
+        done = done.to(self.device, non_blocking=non_blocking)
+        nxt = nxt.to(self.device, non_blocking=non_blocking)
+
+        return obs, act, rew, done, nxt
 

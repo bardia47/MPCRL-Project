@@ -16,7 +16,7 @@ TOTAL_STEPS       = 200_000
 RANDOM_STEPS      = 5_000        # pure random
 USE_MPC_UNTIL     = 50_000       # after this, switch to actor for speed
 UPDATES_START     = 1_000
-UPDATES_PER_STEP  = 10
+UPDATES_PER_STEP  = 2
 BATCH_SIZE        = 512
 LOG_EVERY         = 1_000        # still print each 1k, but we log EVERY step/episode to file
 SAVE_EVERY        = 5_000
@@ -65,31 +65,33 @@ def policy_action(agent: TD_MPC2_Agent, obs, sample=True):
 
 # ---------- Lightweight CEM ----------
 @torch.no_grad()
-def plan_cem_light(agent: TD_MPC2_Agent, obs,
-                   horizon=CEM_HORIZON, pop=CEM_POP, iters=CEM_ITERS,
-                   elite_frac=CEM_ELITE_FR, discount=CEM_DISCOUNT):
+def plan_cem_vectorized(agent: TD_MPC2_Agent, obs,
+                        horizon=CEM_HORIZON, pop=CEM_POP,
+                        iters=CEM_ITERS, elite_frac=CEM_ELITE_FR,
+                        discount=CEM_DISCOUNT):
     device = agent.device
     act_dim = agent.actor.net[-1].out_features // 2
     z0 = agent.wm.encode(torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0))
+    z0 = z0.expand(pop, -1)  # repeat z0 for entire population
 
     elites = max(1, int(pop * elite_frac))
     mean = torch.zeros(horizon, act_dim, device=device)
     std  = torch.ones_like(mean) * 0.5
 
     for _ in range(iters):
+        # Sample all actions in one go: (pop, horizon, act_dim)
         actions = torch.normal(mean.expand(pop, -1, -1), std.expand(pop, -1, -1))
-        returns = []
-        for i in range(pop):
-            z = z0.clone()
-            G = torch.tensor(0.0, device=device)
-            gamma = 1.0
-            for a in actions[i]:
-                z, r = agent.wm.predict(z, a.unsqueeze(0))
-                G = G + gamma * r.squeeze()
-                gamma *= discount
-            G = G + gamma * agent.val(z).squeeze()
-            returns.append(G)
-        returns = torch.stack(returns)
+        returns = torch.zeros(pop, device=device)
+        gammas = torch.ones(pop, device=device)
+
+        z = z0.clone()  # shape: (pop, latent_dim)
+        for t in range(horizon):
+            a_t = actions[:, t, :]  # (pop, act_dim)
+            z, r = agent.wm.predict(z, a_t)
+            returns += gammas * r.squeeze(-1)
+            gammas *= discount
+
+        returns += gammas * agent.val(z).squeeze(-1)
         top_idx = torch.topk(returns, elites).indices
         elite_actions = actions[top_idx]
         mean, std = elite_actions.mean(0), elite_actions.std(0) + 1e-4
@@ -166,7 +168,7 @@ def run_eval_episode(env, agent, use_mpc=True, max_steps=400):
     ob = flatten_obs(ob)
     ret, t, done = 0.0, 0, False
     while not done and t < max_steps:
-        a = plan_cem_light(agent, ob) if use_mpc else policy_action(agent, ob, sample=False)
+        a = plan_cem_vectorized(agent, ob) if use_mpc else policy_action(agent, ob, sample=False)
         ob, r, term, trunc, _ = env.step(a)
         ret += r
         ob = flatten_obs(ob)
@@ -273,7 +275,7 @@ def main():
             if step < RANDOM_STEPS:
                 a = np.random.uniform(-1, 1, act_dim)
             elif step < USE_MPC_UNTIL:
-                a = plan_cem_light(agent, o)  # MPC (light)
+                a = plan_cem_vectorized(agent, o)  # MPC (light)
             else:
                 a = policy_action(agent, o, sample=True)  # fast actor
 
