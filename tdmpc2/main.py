@@ -1,42 +1,38 @@
-# main.py
-import os
-import time
-import json
-import threading
-import tempfile
-import numpy as np
-import torch
-import gymnasium as gym
-import highway_env
+import os, time, json, numpy as np, torch, gymnasium as gym, highway_env
 from collections import deque
+import matplotlib.pyplot as plt
 from agent import TD_MPC2_Agent
 from replay_buffer import ReplayBuffer
 
-# --- WSL headless setup ---
-os.environ["SDL_VIDEODRIVER"] = "dummy"
-os.environ["SDL_AUDIODRIVER"] = "dummy"
-os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+# ---------- Paths (edit to Drive paths if you mounted it) ----------
+CKPT_DIR    = "checkpoints"
+REPORTS_DIR = "reports"
+os.makedirs(CKPT_DIR, exist_ok=True)
+os.makedirs(REPORTS_DIR, exist_ok=True)
+REPORT_PATH = os.path.join(REPORTS_DIR, "training_log.jsonl")  # json lines
 
-# --- Training parameters ---
+# ---------- Training knobs ----------
 TOTAL_STEPS       = 200_000
-RANDOM_STEPS      = 5_000
+RANDOM_STEPS      = 5_000        # pure random
+USE_MPC_UNTIL     = 50_000       # after this, switch to actor for speed
 UPDATES_START     = 1_000
 UPDATES_PER_STEP  = 2
 BATCH_SIZE        = 128
-LOG_EVERY         = 1_000
+LOG_EVERY         = 1_000        # still print each 1k, but we log EVERY step/episode to file
 SAVE_EVERY        = 5_000
+EVAL_EVERY        = 10_000       # run an MPC eval episode
+PLOT_AT_END       = True         # make summary plots on finish
 
-# --- Folders ---
-CKPT_DIR   = os.path.expanduser("~/checkpoints")
-REPORTS_DIR= os.path.expanduser("~/reports")
-os.makedirs(CKPT_DIR, exist_ok=True)
-os.makedirs(REPORTS_DIR, exist_ok=True)
-REPORT_PATH = os.path.join(REPORTS_DIR, "training_log.json")
+# ---------- Light CEM params (faster) ----------
+CEM_HORIZON   = 6
+CEM_POP       = 64
+CEM_ITERS     = 3
+CEM_ELITE_FR  = 0.1
+CEM_DISCOUNT  = 0.99
 
-# --- Environment ---
-def make_env(render=False):
-    render_mode = "human" if render else "rgb_array"
-    env = gym.make("parking-v0", render_mode=render_mode)
+# ---------- Env ----------
+def make_env():
+    env = gym.make("parking-v0", render_mode="rgb_array")
     env.unwrapped.configure({
         "observation": {
             "type": "KinematicsGoal",
@@ -52,93 +48,238 @@ def make_env(render=False):
     env.reset()
     return env
 
-
 def flatten_obs(obs):
     if isinstance(obs, dict):
         return np.concatenate([obs["observation"], obs["desired_goal"]]).astype(np.float32)
     return np.asarray(obs, dtype=np.float32)
 
+# ---------- Actor action helper ----------
+@torch.no_grad()
+def policy_action(agent: TD_MPC2_Agent, obs, sample=True):
+    device = agent.device
+    z = agent.wm.encode(torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0))
+    a, dist = agent.actor(z)
+    if not sample:
+        a = torch.tanh(dist.mean)
+    return a.squeeze(0).detach().cpu().numpy()
 
-# --- Fully async safe checkpoint ---
-def safe_checkpoint(path, step, agent):
-    """Snapshot and save asynchronously to avoid any CUDA sync or freeze."""
-    final_dir = os.path.dirname(path)
-    os.makedirs(final_dir, exist_ok=True)
+# ---------- Lightweight CEM ----------
+@torch.no_grad()
+def plan_cem_light(agent: TD_MPC2_Agent, obs,
+                   horizon=CEM_HORIZON, pop=CEM_POP, iters=CEM_ITERS,
+                   elite_frac=CEM_ELITE_FR, discount=CEM_DISCOUNT):
+    device = agent.device
+    act_dim = agent.actor.net[-1].out_features // 2
+    z0 = agent.wm.encode(torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0))
 
-    def _snapshot_and_save():
-        try:
-            # Lower thread priority to avoid CPU contention
-            try:
-                os.nice(10)
-            except Exception:
-                pass
+    elites = max(1, int(pop * elite_frac))
+    mean = torch.zeros(horizon, act_dim, device=device)
+    std  = torch.ones_like(mean) * 0.5
 
-            # --- Snapshot all weights on background thread ---
-            weights = {}
-            for name, param in agent.wm.state_dict().items():
-                weights[f"wm.{name}"] = param.detach().cpu().clone().numpy()
-            for name, param in agent.val.state_dict().items():
-                weights[f"val.{name}"] = param.detach().cpu().clone().numpy()
-            for name, param in agent.actor.state_dict().items():
-                weights[f"actor.{name}"] = param.detach().cpu().clone().numpy()
+    for _ in range(iters):
+        actions = torch.normal(mean.expand(pop, -1, -1), std.expand(pop, -1, -1))
+        returns = []
+        for i in range(pop):
+            z = z0.clone()
+            G = torch.tensor(0.0, device=device)
+            gamma = 1.0
+            for a in actions[i]:
+                z, r = agent.wm.predict(z, a.unsqueeze(0))
+                G = G + gamma * r.squeeze()
+                gamma *= discount
+            G = G + gamma * agent.val(z).squeeze()
+            returns.append(G)
+        returns = torch.stack(returns)
+        top_idx = torch.topk(returns, elites).indices
+        elite_actions = actions[top_idx]
+        mean, std = elite_actions.mean(0), elite_actions.std(0) + 1e-4
 
-            # --- Write atomically ---
-            fd, tmp_path = tempfile.mkstemp(dir=final_dir, prefix=".ckpt_", suffix=".tmp")
-            os.close(fd)
-            with open(tmp_path, "wb") as f:
-                np.savez(f, step=step, **weights)
-            os.replace(tmp_path, path)
-            print(f"[background] saved checkpoint → {os.path.basename(path)}")
+    a0 = mean[0].clamp(-1, 1)
+    return a0.detach().cpu().numpy()
 
-        except Exception as e:
-            print(f"[checkpoint error] {e}")
-            try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except Exception:
-                pass
-
-    threading.Thread(target=_snapshot_and_save, daemon=True).start()
-
-
-# --- JSON log writer ---
-def save_report(step, loss, avg_return):
-    entry = {
+# ---------- Checkpointing ----------
+def save_checkpoint(step, agent: TD_MPC2_Agent):
+    path = os.path.join(CKPT_DIR, f"tdmpc2_step_{step}.pt")
+    torch.save({
         "step": step,
-        "loss": float(loss) if loss is not None else None,
-        "avg_return": float(avg_return),
-        "timestamp": time.time(),
-    }
+        "wm": agent.wm.state_dict(),
+        "val": agent.val.state_dict(),
+        "actor": agent.actor.state_dict(),
+        "opt": agent.opt.state_dict(),
+    }, path)
+    print(f"[checkpoint] saved → {path}")
+
+def load_latest_checkpoint(agent: TD_MPC2_Agent):
+    ckpts = [f for f in os.listdir(CKPT_DIR) if f.endswith(".pt")]
+    if not ckpts:
+        print("[checkpoint] none found, starting fresh")
+        return 1
+    ckpts.sort(key=lambda x: int(x.split("_")[2].split(".")[0]))  # tdmpc2_step_XXXXX.pt
+    latest = os.path.join(CKPT_DIR, ckpts[-1])
+    print(f"[resume] loading {latest}")
+    ckpt = torch.load(latest, map_location="cpu")
+    agent.wm.load_state_dict(ckpt["wm"])
+    agent.val.load_state_dict(ckpt["val"])
+    agent.actor.load_state_dict(ckpt["actor"])
+    agent.opt.load_state_dict(ckpt["opt"])
+    start = int(ckpt["step"]) + 1
+    print(f"[resume] resumed from step {start-1}")
+    return start
+
+# ---------- JSON logging ----------
+def log_jsonl(obj):
+    obj["ts"] = time.time()
     with open(REPORT_PATH, "a") as f:
-        f.write(json.dumps(entry) + "\n")
+        f.write(json.dumps(obj) + "\n")
 
+def log_step(step, loss, avg_return):
+    log_jsonl({
+        "type": "step",
+        "step": int(step),
+        "loss": (float(loss) if loss is not None else None),
+        "avg_return": float(avg_return)
+    })
 
-# --- Main training ---
+def log_episode(ep_idx, step, ep_return, ep_len, avg_return):
+    log_jsonl({
+        "type": "episode",
+        "episode": int(ep_idx),
+        "step_end": int(step),
+        "return": float(ep_return),
+        "length": int(ep_len),
+        "avg_return": float(avg_return)
+    })
+
+def log_eval(step, ret_mpc, len_mpc, ret_actor, len_actor):
+    log_jsonl({
+        "type": "eval",
+        "step": int(step),
+        "mpc_return": float(ret_mpc),
+        "mpc_length": int(len_mpc),
+        "actor_return": float(ret_actor),
+        "actor_length": int(len_actor)
+    })
+
+# ---------- Eval ----------
+def run_eval_episode(env, agent, use_mpc=True, max_steps=400):
+    ob, _ = env.reset()
+    ob = flatten_obs(ob)
+    ret, t, done = 0.0, 0, False
+    while not done and t < max_steps:
+        a = plan_cem_light(agent, ob) if use_mpc else policy_action(agent, ob, sample=False)
+        ob, r, term, trunc, _ = env.step(a)
+        ret += r
+        ob = flatten_obs(ob)
+        done = term or trunc
+        t += 1
+    return ret, t
+
+# ---------- Plotting ----------
+def make_plots():
+    steps, losses, avg_steps = [], [], []
+    ep_idx, ep_returns, ep_avg, ep_steps = [], [], [], []
+    eval_steps, mpc_ret, actor_ret = [], [], []
+
+    # parse jsonl
+    with open(REPORT_PATH, "r") as f:
+        for line in f:
+            rec = json.loads(line)
+            t = rec.get("type", "")
+            if t == "step":
+                steps.append(rec["step"])
+                losses.append(rec["loss"] if rec["loss"] is not None else None)
+                avg_steps.append(rec["avg_return"])
+            elif t == "episode":
+                ep_idx.append(rec["episode"])
+                ep_returns.append(rec["return"])
+                ep_avg.append(rec["avg_return"])
+                ep_steps.append(rec["step_end"])
+            elif t == "eval":
+                eval_steps.append(rec["step"])
+                mpc_ret.append(rec["mpc_return"])
+                actor_ret.append(rec["actor_return"])
+
+    def _savefig(name):
+        path = os.path.join(REPORTS_DIR, name)
+        plt.savefig(path, bbox_inches="tight")
+        print(f"[plot] saved → {path}")
+        plt.clf()
+
+    # 1) Loss over steps
+    plt.figure(figsize=(8,4))
+    ys = [v for v in losses if v is not None]
+    xs = [s for s,v in zip(steps, losses) if v is not None]
+    if xs:
+        plt.plot(xs, ys)
+    plt.title("Training Loss")
+    plt.xlabel("Step")
+    plt.ylabel("Loss")
+    _savefig("loss_over_steps.png")
+
+    # 2) Episode returns (scatter) + rolling avg (line)
+    plt.figure(figsize=(8,4))
+    if ep_idx:
+        plt.scatter(ep_steps, ep_returns, s=8, alpha=0.5, label="episode return")
+    if ep_steps:
+        # 100-episode moving average of returns:
+        import math
+        win = 100
+        if len(ep_returns) >= 2:
+            mov = []
+            for i in range(len(ep_returns)):
+                lo = max(0, i - win + 1)
+                mov.append(np.mean(ep_returns[lo:i+1]))
+            plt.plot(ep_steps, mov, linewidth=2, label=f"{win}-episode moving avg")
+    plt.title("Episode Returns")
+    plt.xlabel("Env Step (end of episode)")
+    plt.ylabel("Return")
+    plt.legend()
+    _savefig("episode_returns.png")
+
+    # 3) Actor vs MPC eval returns
+    plt.figure(figsize=(8,4))
+    if eval_steps:
+        plt.plot(eval_steps, mpc_ret, label="MPC eval return")
+        plt.plot(eval_steps, actor_ret, label="Actor eval return")
+        plt.legend()
+    plt.title("Eval: MPC vs Actor")
+    plt.xlabel("Step")
+    plt.ylabel("Return")
+    _savefig("eval_returns.png")
+
+# ---------- Main ----------
 def main():
-    env = make_env(render=False)
+    env = make_env()
     obs_dim, act_dim = 12, 2
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    print("Device:", device)
+
     agent = TD_MPC2_Agent(obs_dim, act_dim, device=device)
     buffer = ReplayBuffer(obs_dim, act_dim)
+    start_step = load_latest_checkpoint(agent)
 
     o, _ = env.reset()
     o = flatten_obs(o)
     last_loss = None
     episode_return, episode_len = 0.0, 0
     recent_returns = deque(maxlen=10)
+    episodes_seen = 0
 
-    print(f"[info] Training started. Saving every {SAVE_EVERY} steps...")
+    print(f"[info] Training started. random={RANDOM_STEPS}, mpc_until={USE_MPC_UNTIL}, save_every={SAVE_EVERY}")
 
     try:
-        for step in range(1, TOTAL_STEPS + 1):
-            # --- Act ---
+        for step in range(start_step, TOTAL_STEPS + 1):
+            # --- action selection (hybrid) ---
             if step < RANDOM_STEPS:
                 a = np.random.uniform(-1, 1, act_dim)
+            elif step < USE_MPC_UNTIL:
+                a = plan_cem_light(agent, o)  # MPC (light)
             else:
-                a = np.asarray(agent.plan(o), dtype=np.float32).reshape(-1)
-            a = np.clip(a, env.action_space.low, env.action_space.high)
+                a = policy_action(agent, o, sample=True)  # fast actor
 
-            # --- Environment step ---
+            a = np.clip(a, -1.0, 1.0)
+
+            # --- env step ---
             o2, r, term, trunc, _ = env.step(a)
             done = term or trunc
             episode_return += r
@@ -148,43 +289,54 @@ def main():
             buffer.add(o, a, r, done, o2)
             o = o2 if not done else flatten_obs(env.reset()[0])
 
-            # --- End of episode ---
-            if done:
-                recent_returns.append(episode_return)
-                avg_ret = float(np.mean(recent_returns)) if recent_returns else 0.0
-                print(f"[episode] return={episode_return:.2f} len={episode_len} avg(10)={avg_ret:.2f}")
-                episode_return, episode_len = 0.0, 0
-
-            # --- Learning ---
+            # --- learn ---
             if step > UPDATES_START:
                 for _ in range(UPDATES_PER_STEP):
                     batch = buffer.sample(BATCH_SIZE)
                     last_loss = agent.update(batch)
 
-            # --- Logging ---
+            # --- per-step logging (dense) ---
+            avg_ret = float(np.mean(recent_returns)) if recent_returns else 0.0
+            log_step(step, last_loss, avg_ret)
+
+            # --- episode end ---
+            if done:
+                episodes_seen += 1
+                recent_returns.append(episode_return)
+                avg_ret = float(np.mean(recent_returns))
+                print(f"[episode {episodes_seen}] return={episode_return:.2f} len={episode_len} avg(10)={avg_ret:.2f}")
+                log_episode(episodes_seen, step, episode_return, episode_len, avg_ret)
+                episode_return, episode_len = 0.0, 0
+
+            # --- console heartbeat ---
             if step % LOG_EVERY == 0:
-                avg_ret = float(np.mean(recent_returns)) if recent_returns else 0.0
                 loss_str = f"{last_loss:.4f}" if last_loss is not None else "N/A"
                 print(f"[step {step}] loss={loss_str}, avg_return={avg_ret:.2f}")
-                save_report(step, last_loss, avg_ret)
 
-            # --- Checkpoint saving ---
+            # --- checkpoint ---
             if step % SAVE_EVERY == 0:
-                ckpt_path = os.path.join(CKPT_DIR, f"tdmpc2_step_{step}.npz")
-                safe_checkpoint(ckpt_path, step, agent)
-                print(f"[checkpoint] queued save → {ckpt_path}")
+                save_checkpoint(step, agent)
+
+            # --- periodic eval ---
+            if step % EVAL_EVERY == 0:
+                ret_mpc, len_mpc     = run_eval_episode(env, agent, use_mpc=True)
+                ret_actor, len_actor = run_eval_episode(env, agent, use_mpc=False)
+                print(f"[eval @ {step}] MPC  return={ret_mpc:.2f} len={len_mpc} | "
+                      f"Actor return={ret_actor:.2f} len={len_actor}")
+                log_eval(step, ret_mpc, len_mpc, ret_actor, len_actor)
 
         print(f"[info] Training complete. Total steps: {TOTAL_STEPS}")
 
     except KeyboardInterrupt:
-        print("\n[info] Interrupted — saving final checkpoint...")
-        ckpt_path = os.path.join(CKPT_DIR, f"tdmpc2_step_{step}_INTERRUPTED.npz")
-        safe_checkpoint(ckpt_path, step, agent)
+        print("\n[info] Interrupted — saving checkpoint...")
+        save_checkpoint(step, agent)
 
     finally:
         env.close()
         print(f"[info] Environment closed. Logs at {REPORT_PATH}")
-
+        if PLOT_AT_END:
+            print("[plot] generating plots...")
+            make_plots()
 
 if __name__ == "__main__":
     main()

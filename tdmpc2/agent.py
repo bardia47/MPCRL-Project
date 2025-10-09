@@ -1,4 +1,3 @@
-# agent.py
 import torch, torch.nn as nn, torch.optim as optim
 import numpy as np
 
@@ -11,6 +10,7 @@ def mlp(in_dim, out_dim, hid=256, layers=3):
         in_dim = hid
     net += [nn.Linear(in_dim, out_dim)]
     return nn.Sequential(*net)
+
 
 # ---------- World Model (latent dynamics) ----------
 class WorldModel(nn.Module):
@@ -29,19 +29,23 @@ class WorldModel(nn.Module):
         r_pred = self.reward(za)
         return z_next, r_pred
 
+
 # ---------- Value Function ----------
 class ValueNet(nn.Module):
     def __init__(self, latent_dim, hid=256):
         super().__init__()
         self.v = mlp(latent_dim, 1, hid)
+
     def forward(self, z):
         return self.v(z)
+
 
 # ---------- Actor (learned policy for warm-start) ----------
 class Actor(nn.Module):
     def __init__(self, latent_dim, act_dim, hid=256):
         super().__init__()
         self.net = mlp(latent_dim, 2 * act_dim, hid)
+
     def forward(self, z):
         mu_logstd = self.net(z)
         mu, logstd = mu_logstd.chunk(2, -1)
@@ -49,6 +53,7 @@ class Actor(nn.Module):
         dist = torch.distributions.Normal(mu, std)
         a = dist.rsample()
         return torch.tanh(a), dist
+
 
 # ---------- CEM Planning (Model Predictive Control) ----------
 @torch.no_grad()
@@ -73,6 +78,7 @@ def cem_plan(model, value_fn, z0, act_dim, horizon=10, pop=512, elite_frac=0.1, 
         mean, std = elite_actions.mean(0), elite_actions.std(0) + 1e-4
     return mean[0].clamp(-1, 1)
 
+
 # ---------- TD-MPC2 Agent ----------
 class TD_MPC2_Agent:
     def __init__(self, obs_dim, act_dim, device="cpu"):
@@ -85,7 +91,7 @@ class TD_MPC2_Agent:
 
     def plan(self, obs):
         z0 = self.wm.encode(torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0))
-        return cem_plan(self.wm, self.val, z0, act_dim=self.actor.net[-1].out_features//2).cpu().numpy()
+        return cem_plan(self.wm, self.val, z0, act_dim=self.actor.net[-1].out_features // 2).cpu().numpy()
 
     def update(self, batch):
         o, a, r, d, o2 = [x.to(self.device).float() for x in batch]
@@ -98,11 +104,14 @@ class TD_MPC2_Agent:
         v_loss = (self.val(z) - v_target).pow(2).mean()
 
         loss = model_loss + v_loss
-        self.opt.zero_grad(); loss.backward(); self.opt.step()
+        self.opt.zero_grad()
+        loss.backward()
+        self.opt.step()
         return loss.item()
 
+    # --- Checkpoint helpers ---
     def state_dict(self):
-        """Collect all model weights + optimizer state for checkpointing."""
+        """Collect all model and optimizer weights for checkpointing."""
         return {
             "wm": self.wm.state_dict(),
             "val": self.val.state_dict(),
@@ -112,7 +121,7 @@ class TD_MPC2_Agent:
         }
 
     def load_state_dict(self, state_dict):
-        """Reload model and optimizer weights from checkpoint."""
+        """Reload all model and optimizer weights from checkpoint."""
         self.wm.load_state_dict(state_dict["wm"])
         self.val.load_state_dict(state_dict["val"])
         self.actor.load_state_dict(state_dict["actor"])
