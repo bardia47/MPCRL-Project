@@ -13,10 +13,10 @@ REPORT_PATH = os.path.join(REPORTS_DIR, "training_log.jsonl")  # json lines
 
 # ---------- Training knobs ----------
 TOTAL_STEPS       = 200_000
-RANDOM_STEPS      = 5_000        # pure random
+RANDOM_STEPS      = 20_000        # pure random
 USE_MPC_UNTIL     = 50_000       # after this, switch to actor for speed
 UPDATES_START     = 1_000
-UPDATES_PER_STEP  = 2
+UPDATES_PER_STEP  = 8
 BATCH_SIZE        = 512
 LOG_EVERY         = 1_000        # still print each 1k, but we log EVERY step/episode to file
 SAVE_EVERY        = 5_000

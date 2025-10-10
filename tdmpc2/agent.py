@@ -86,7 +86,8 @@ class TD_MPC2_Agent:
         self.wm = WorldModel(obs_dim, act_dim).to(self.device)
         self.val = ValueNet(64).to(self.device)
         self.actor = Actor(64, act_dim).to(self.device)
-        self.opt = optim.Adam(list(self.wm.parameters()) + list(self.val.parameters()), lr=3e-4)
+        self.opt = optim.Adam(list(self.wm.parameters()) + list(self.val.parameters())  +
+                              list(self.actor.parameters()), lr=3e-4)
         self.gamma = 0.99
 
     def plan(self, obs):
