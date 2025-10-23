@@ -12,23 +12,26 @@ os.makedirs(REPORTS_DIR, exist_ok=True)
 REPORT_PATH = os.path.join(REPORTS_DIR, "training_log.jsonl")  # json lines
 
 # ---------- Training knobs ----------
-TOTAL_STEPS       = 200_000
-RANDOM_STEPS      = 20_000        # pure random
-USE_MPC_UNTIL     = 50_000       # after this, switch to actor for speed
+#TOTAL_STEPS       = 200_000
+#RANDOM_STEPS      = 20_000        # pure random
+#USE_MPC_UNTIL     = 50_000       # after this, switch to actor for speed
+TOTAL_STEPS       = 100_000
+RANDOM_STEPS      = 5_000        # pure random
+USE_MPC_UNTIL     = 60_000       # after this, switch to actor for speed
 UPDATES_START     = 1_000
-UPDATES_PER_STEP  = 8
-BATCH_SIZE        = 512
+UPDATES_PER_STEP  = 4
+BATCH_SIZE        = 256
 LOG_EVERY         = 1_000        # still print each 1k, but we log EVERY step/episode to file
 SAVE_EVERY        = 5_000
 EVAL_EVERY        = 10_000       # run an MPC eval episode
 PLOT_AT_END       = True         # make summary plots on finish
 
 # ---------- Light CEM params (faster) ----------
-CEM_HORIZON = 15
-CEM_POP     = 128
+CEM_HORIZON = 10
+CEM_POP     = 64
 CEM_ITERS   = 4
-CEM_ELITE_FR  = 0.1
-CEM_DISCOUNT  = 0.99
+CEM_ELITE_FR  = 0.3
+CEM_DISCOUNT  = 0.95
 
 # ---------- Env ----------
 def make_env():
@@ -40,10 +43,11 @@ def make_env():
             "scales": [100,100,5,5,1,1],
             "normalize": True,
         },
+        "duration": 10,
         "action": {"type": "ContinuousAction"},
-        "simulation_frequency": 15,
-        "policy_frequency": 5,
-        "offscreen_rendering": True,
+        "simulation_frequency": 10,
+        "policy_frequency": 10,
+        "offscreen_rendering": False,
     })
     env.reset()
     return env
@@ -68,33 +72,44 @@ def policy_action(agent: TD_MPC2_Agent, obs, sample=True):
 def plan_cem_vectorized(agent: TD_MPC2_Agent, obs,
                         horizon=CEM_HORIZON, pop=CEM_POP,
                         iters=CEM_ITERS, elite_frac=CEM_ELITE_FR,
-                        discount=CEM_DISCOUNT):
+                        discount=CEM_DISCOUNT, debug=False, step=None):
     device = agent.device
     act_dim = agent.actor.net[-1].out_features // 2
     z0 = agent.wm.encode(torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0))
-    z0 = z0.expand(pop, -1)  # repeat z0 for entire population
+    z0 = z0.expand(pop, -1)
 
     elites = max(1, int(pop * elite_frac))
     mean = torch.zeros(horizon, act_dim, device=device)
     std  = torch.ones_like(mean) * 0.5
 
+    last_returns = None
     for _ in range(iters):
-        # Sample all actions in one go: (pop, horizon, act_dim)
         actions = torch.normal(mean.expand(pop, -1, -1), std.expand(pop, -1, -1))
         returns = torch.zeros(pop, device=device)
         gammas = torch.ones(pop, device=device)
-
-        z = z0.clone()  # shape: (pop, latent_dim)
+        z = z0.clone()
         for t in range(horizon):
-            a_t = actions[:, t, :]  # (pop, act_dim)
+            a_t = actions[:, t, :]
             z, r = agent.wm.predict(z, a_t)
             returns += gammas * r.squeeze(-1)
             gammas *= discount
-
-        returns += gammas * agent.val(z).squeeze(-1)
+        tail = agent.val(z).squeeze(-1)
+        tail = torch.clamp(tail, -5.0, 5.0)  # جلوی بدبینیِ شدید
+        w_tail = 0.0 if step is not None and step < 30_000 else 1.0  # تا 30k خاموش
+        returns += gammas * (w_tail * tail)
+        last_returns = returns
         top_idx = torch.topk(returns, elites).indices
         elite_actions = actions[top_idx]
         mean, std = elite_actions.mean(0), elite_actions.std(0) + 1e-4
+
+    if debug and last_returns is not None:
+        log_jsonl({
+            "type": "cem",
+            "step": int(step) if step is not None else -1,
+            "ret_mean": float(last_returns.mean().item()),
+            "ret_best": float(last_returns.max().item()),
+            "act_std_mean": float(std.mean().item()),
+        })
 
     a0 = mean[0].clamp(-1, 1)
     return a0.detach().cpu().numpy()
@@ -129,6 +144,25 @@ def load_latest_checkpoint(agent: TD_MPC2_Agent):
     return start
 
 # ---------- JSON logging ----------
+
+def log_config(agent):
+    cfg = {
+        "type": "config",
+        "TOTAL_STEPS": TOTAL_STEPS, "RANDOM_STEPS": RANDOM_STEPS, "USE_MPC_UNTIL": USE_MPC_UNTIL,
+        "UPDATES_START": UPDATES_START, "UPDATES_PER_STEP": UPDATES_PER_STEP, "BATCH_SIZE": BATCH_SIZE,
+        "CEM_HORIZON": CEM_HORIZON, "CEM_POP": CEM_POP, "CEM_ITERS": CEM_ITERS,
+        "CEM_ELITE_FR": CEM_ELITE_FR, "CEM_DISCOUNT": CEM_DISCOUNT,
+        "device": str(agent.device),
+        "seed": int(np.random.randint(0, 1e9)),
+    }
+    log_jsonl(cfg)
+
+def log_train(step, metrics: dict, extra: dict = None):
+    rec = {"type": "train", "step": int(step)}
+    rec.update({k: (float(v) if v is not None else None) for k, v in metrics.items()})
+    if extra:
+        rec.update(extra)
+    log_jsonl(rec)
 def log_jsonl(obj):
     obj["ts"] = time.time()
     with open(REPORT_PATH, "a") as f:
@@ -168,7 +202,10 @@ def run_eval_episode(env, agent, use_mpc=True, max_steps=400):
     ob = flatten_obs(ob)
     ret, t, done = 0.0, 0, False
     while not done and t < max_steps:
-        a = plan_cem_vectorized(agent, ob) if use_mpc else policy_action(agent, ob, sample=False)
+        if use_mpc:
+            a = plan_cem_vectorized(agent, ob)  # با پیش‌فرض‌ها
+        else:
+            a = policy_action(agent, ob, sample=False)
         ob, r, term, trunc, _ = env.step(a)
         ret += r
         ob = flatten_obs(ob)
@@ -257,6 +294,7 @@ def main():
     print("Device:", device)
 
     agent = TD_MPC2_Agent(obs_dim, act_dim, device=device)
+    log_config(agent)
     buffer = ReplayBuffer(obs_dim, act_dim, device=device)
     start_step = load_latest_checkpoint(agent)
 
@@ -275,27 +313,42 @@ def main():
             if step < RANDOM_STEPS:
                 a = np.random.uniform(-1, 1, act_dim)
             elif step < USE_MPC_UNTIL:
-                a = plan_cem_vectorized(agent, o)  # MPC (light)
+                debug_cem = (step % 500 == 0 and step >= RANDOM_STEPS)
+                a = plan_cem_vectorized(agent, o, debug=debug_cem, step=step)
             else:
                 a = policy_action(agent, o, sample=True)  # fast actor
 
             a = np.clip(a, -1.0, 1.0)
-
+            act_abs_mean = float(np.mean(np.abs(a)))
+            act_max = float(np.max(np.abs(a)))
             # --- env step ---
             o2, r, term, trunc, _ = env.step(a)
             done = term or trunc
             episode_return += r
             episode_len += 1
-
+            buf_size = buffer.size if buffer.full else buffer.ptr
             o2 = flatten_obs(o2)
             buffer.add(o, a, r, done, o2)
             o = o2 if not done else flatten_obs(env.reset()[0])
 
             # --- learn ---
             if step > UPDATES_START:
-                for _ in range(UPDATES_PER_STEP):
+                metrics = None
+                for _ in range((1 if step<RANDOM_STEPS else UPDATES_PER_STEP)):
                     batch = buffer.sample(BATCH_SIZE)
-                    last_loss = agent.update(batch)
+                    metrics = agent.update(batch)
+            else:
+                metrics = {"loss": None, "model_loss": None, "z_mse": None, "r_mse": None,
+                           "v_loss": None, "val_mean": None}
+            avg_ret = float(np.mean(recent_returns)) if recent_returns else 0.0
+            extra = {
+                "avg_return": avg_ret,
+                "act_abs_mean": act_abs_mean,
+                "act_abs_max": act_max,
+                "done": int(done),
+                "buf_size": int(buf_size),
+            }
+            log_train(step, metrics, extra=extra)
 
             # --- per-step logging (dense) ---
             avg_ret = float(np.mean(recent_returns)) if recent_returns else 0.0
@@ -306,14 +359,14 @@ def main():
                 episodes_seen += 1
                 recent_returns.append(episode_return)
                 avg_ret = float(np.mean(recent_returns))
-                print(f"[episode {episodes_seen}] return={episode_return:.2f} len={episode_len} avg(10)={avg_ret:.2f}")
+                #print(f"[episode {episodes_seen}] return={episode_return:.2f} len={episode_len} avg(10)={avg_ret:.2f}")
                 log_episode(episodes_seen, step, episode_return, episode_len, avg_ret)
                 episode_return, episode_len = 0.0, 0
 
             # --- console heartbeat ---
             if step % LOG_EVERY == 0:
-                loss_str = f"{last_loss:.4f}" if last_loss is not None else "N/A"
-                print(f"[step {step}] loss={loss_str}, avg_return={avg_ret:.2f}")
+             loss_str = f"{last_loss:.4f}" if last_loss is not None else "N/A"
+             print(f"[step {step}] loss={loss_str}, avg_return={avg_ret:.2f}")
 
             # --- checkpoint ---
             if step % SAVE_EVERY == 0:
