@@ -1,16 +1,15 @@
 import torch, torch.nn as nn, torch.optim as optim
 import numpy as np
-
+import torch.nn.functional as F
 
 # ---------- small MLP factory ----------
-def mlp(in_dim, out_dim, hid=256, layers=3):
+def mlp(in_dim, out_dim, hid=128, layers=2):
     net = []
     for _ in range(layers):
         net += [nn.Linear(in_dim, hid), nn.LayerNorm(hid), nn.SiLU()]
         in_dim = hid
     net += [nn.Linear(in_dim, out_dim)]
     return nn.Sequential(*net)
-
 
 # ---------- World Model (latent dynamics) ----------
 class WorldModel(nn.Module):
@@ -83,13 +82,14 @@ def cem_plan(model, value_fn, z0, act_dim, horizon=10, pop=512, elite_frac=0.1, 
 class TD_MPC2_Agent:
     def __init__(self, obs_dim, act_dim, device="cpu"):
         self.device = torch.device(device)
-        self.wm = WorldModel(obs_dim, act_dim).to(self.device)
-        self.val = ValueNet(64).to(self.device)
-        self.actor = Actor(64, act_dim).to(self.device)
-        self.opt = optim.Adam(list(self.wm.parameters()) + list(self.val.parameters())  +
-                              list(self.actor.parameters()), lr=3e-4)
-        self.gamma = 0.99
-
+        self.wm = WorldModel(obs_dim, act_dim, latent_dim=32, hid=128).to(self.device)
+        self.val = ValueNet(32, hid=128).to(self.device)
+        self.actor = Actor(32, act_dim, hid=128).to(self.device)
+        self.opt = optim.Adam(
+            list(self.wm.parameters()) + list(self.val.parameters()) + list(self.actor.parameters()),
+            lr=1e-4
+        )
+        self.gamma = 0.90
     def plan(self, obs):
         z0 = self.wm.encode(torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0))
         return cem_plan(self.wm, self.val, z0, act_dim=self.actor.net[-1].out_features // 2).cpu().numpy()
@@ -98,18 +98,33 @@ class TD_MPC2_Agent:
         o, a, r, d, o2 = [x.to(self.device).float() for x in batch]
         z, z2 = self.wm.encode(o), self.wm.encode(o2)
         z_pred, r_pred = self.wm.predict(z, a)
-        model_loss = (z_pred - z2.detach()).pow(2).mean() + (r_pred - r).pow(2).mean()
 
+        r_clipped = torch.clamp(r, -1.0, 1.0)
+
+        z_mse = F.mse_loss(z_pred, z2.detach())
+        r_mse = F.mse_loss(r_pred, r)
+        model_loss = z_mse + 0.5 * r_mse
         with torch.no_grad():
             v_target = r + self.gamma * (1 - d) * self.val(z2)
-        v_loss = (self.val(z) - v_target).pow(2).mean()
+            v_target = torch.clamp(v_target, -5.0, 5.0)
+        v_loss = F.smooth_l1_loss(self.val(z), v_target)
 
         loss = model_loss + v_loss
-        self.opt.zero_grad()
-        loss.backward()
-        self.opt.step()
-        return loss.item()
 
+        self.opt.zero_grad(set_to_none=True)
+        loss.backward()
+
+        self.opt.step()
+
+        metrics = {
+            "loss": float(loss.item()),
+            "model_loss": float(model_loss.item()),
+            "z_mse": float(z_mse.item()),
+            "r_mse": float(r_mse.item()),
+            "v_loss": float(v_loss.item()),
+            "val_mean": float(self.val(z).mean().item()),
+        }
+        return metrics
     # --- Checkpoint helpers ---
     def state_dict(self):
         """Collect all model and optimizer weights for checkpointing."""
