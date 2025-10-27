@@ -69,27 +69,40 @@ class Actor(nn.Module):
 
 # ---------- CEM Planning (Model Predictive Control) ----------
 @torch.no_grad()
-def cem_plan(model, value_fn, z0, act_dim, horizon=5, pop=64, elite_frac=0.1, iters=3):
-    elites = int(pop * elite_frac)
-    mean = torch.zeros(horizon, act_dim, device=z0.device)
-    std = torch.ones_like(mean) * 0.5
-    for _ in range(iters):
-        actions = torch.normal(mean.expand(pop, -1, -1), std.expand(pop, -1, -1))  # (pop,H,act)
-        returns = []
-        for i in range(pop):
-            z, G, discount = z0.clone(), 0, 1
-            for a in actions[i]:
-                z, r = model.predict(z, a.unsqueeze(0))
-                G += discount * r.squeeze()
-                discount *= 0.99
-            G += discount * value_fn(z).squeeze()
-            returns.append(G)
-        returns = torch.stack(returns)
-        top = torch.topk(returns, elites).indices
-        elite_actions = actions[top]
-        mean, std = elite_actions.mean(0), elite_actions.std(0) + 1e-4
-    return mean[0].clamp(-1, 1)
+def cem_plan(model, value_fn, z0, act_dim, horizon=5, pop=64, elite_frac=0.1, iters=3, gamma=0.99,
+             init_mean=None, init_std=None):
+    device = z0.device
+    elites = max(1, int(pop * elite_frac))
 
+    # warm-start optional
+    mean = torch.zeros(horizon, act_dim, device=device) if init_mean is None else init_mean.clone()
+    std  = torch.ones_like(mean) * 0.5 if init_std is None else init_std.clone()
+
+    for _ in range(iters):
+        # sample: (pop, H, act_dim)
+        actions = mean.unsqueeze(0) + std.unsqueeze(0) * torch.randn(pop, horizon, act_dim, device=device)
+
+        # rollout all candidates in batch
+        z = z0.expand(pop, -1).contiguous()         # [pop, z_dim]
+        G = torch.zeros(pop, device=device)         # returns
+        disc = torch.ones(pop, device=device)       # discount
+
+        for t in range(horizon):
+            a_t = actions[:, t, :]                  # [pop, act_dim]
+            z, r = model.predict(z, a_t)
+            G += disc * r.squeeze(-1)
+            disc *= gamma
+
+        # bootstrap value
+        G += disc * value_fn(z).squeeze(-1)
+
+        # elites
+        top_idx = torch.topk(G, elites, dim=0).indices
+        elite_actions = actions[top_idx]            # [elites, H, act_dim]
+        mean = elite_actions.mean(0)
+        std  = elite_actions.std(0) + 1e-4
+
+    return mean[0].clamp(-1, 1)                     # [act_dim]
 
 # ---------- TD-MPC2 Agent ----------
 class TD_MPC2_Agent:
