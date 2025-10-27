@@ -9,7 +9,7 @@ Usage:
 
 import os, argparse, torch, numpy as np, gymnasium as gym, highway_env
 from agent import TD_MPC2_Agent
-
+from tdmpc2.main import plan_cem_vectorized
 
 # ---------- Constants ----------
 CKPT_DIR = "checkpoints"
@@ -55,37 +55,6 @@ def policy_action(agent: TD_MPC2_Agent, obs, sample=False):
     return a.squeeze(0).detach().cpu().numpy()
 
 
-@torch.no_grad()
-def plan_cem_light(agent: TD_MPC2_Agent, obs, horizon=6, pop=64, iters=3, elite_frac=0.1, discount=0.99):
-    device = agent.device
-    act_dim = agent.actor.net[-1].out_features // 2
-    z0 = agent.wm.encode(torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0))
-
-    elites = max(1, int(pop * elite_frac))
-    mean = torch.zeros(horizon, act_dim, device=device)
-    std = torch.ones_like(mean) * 0.5
-
-    for _ in range(iters):
-        actions = torch.normal(mean.expand(pop, -1, -1), std.expand(pop, -1, -1))
-        returns = []
-        for i in range(pop):
-            z = z0.clone()
-            G, gamma = 0.0, 1.0
-            for a in actions[i]:
-                z, r = agent.wm.predict(z, a.unsqueeze(0))
-                G += gamma * r.squeeze()
-                gamma *= discount
-            G += gamma * agent.val(z).squeeze()
-            returns.append(G)
-        returns = torch.stack(returns)
-        top_idx = torch.topk(returns, elites).indices
-        elite_actions = actions[top_idx]
-        mean, std = elite_actions.mean(0), elite_actions.std(0) + 1e-4
-
-    a0 = mean[0].clamp(-1, 1)
-    return a0.detach().cpu().numpy()
-
-
 # ---------- Checkpoint helpers ----------
 def find_latest_ckpt():
     ckpts = [f for f in os.listdir(CKPT_DIR) if f.endswith(".pt") and f.startswith("tdmpc2_step_")]
@@ -112,7 +81,7 @@ def rollout(agent, env, planner="actor", max_steps=400):
 
     while not done and t < max_steps:
         if planner == "mpc":
-            a = plan_cem_light(agent, ob)
+            a = plan_cem_vectorized(agent, ob)
         else:
             a = policy_action(agent, ob, sample=False)
         a = np.clip(a, -1.0, 1.0)
@@ -130,7 +99,7 @@ def main():
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument("--ckpt", type=str, help="Path to specific .pt checkpoint")
     src.add_argument("--latest", action="store_true", help="Use latest checkpoint")
-    parser.add_argument("--planner", choices=["mpc", "actor"], default="actor")
+    parser.add_argument("--planner", choices=["mpc", "actor"], default="mpc")
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--max-steps", type=int, default=400)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")

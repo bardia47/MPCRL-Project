@@ -34,3 +34,6 @@ wandb>=0.17.0  # optional experiment tracking (used in many RL repos)
 
 # ===== Optional / testing =====
 pytest>=8.0.0
+# === MPC ===
+casadi==3.7.2
+#mpc==0.0.6
