@@ -1,15 +1,28 @@
 import torch, torch.nn as nn, torch.optim as optim
 import numpy as np
+
 import torch.nn.functional as F
 
+def contrastive_loss(z_pred, z_target, temperature=0.1):
+    """
+    Simple InfoNCE-style contrastive loss between predicted and true next latents.
+    """
+    z_pred = F.normalize(z_pred, dim=-1)
+    z_target = F.normalize(z_target, dim=-1)
+
+    logits = z_pred @ z_target.T / temperature  # (B, B)
+    labels = torch.arange(len(z_pred), device=z_pred.device)
+    return F.cross_entropy(logits, labels)
+
 # ---------- small MLP factory ----------
-def mlp(in_dim, out_dim, hid=128, layers=2):
+def mlp(in_dim, out_dim, hid=256, layers=3):
     net = []
     for _ in range(layers):
-        net += [nn.Linear(in_dim, hid), nn.LayerNorm(hid), nn.SiLU()]
+        net += [nn.Linear(in_dim, hid), nn.LayerNorm(hid), nn.SiLU(inplace=False)]
         in_dim = hid
     net += [nn.Linear(in_dim, out_dim)]
     return nn.Sequential(*net)
+
 
 # ---------- World Model (latent dynamics) ----------
 class WorldModel(nn.Module):
@@ -56,7 +69,7 @@ class Actor(nn.Module):
 
 # ---------- CEM Planning (Model Predictive Control) ----------
 @torch.no_grad()
-def cem_plan(model, value_fn, z0, act_dim, horizon=10, pop=512, elite_frac=0.1, iters=6):
+def cem_plan(model, value_fn, z0, act_dim, horizon=5, pop=64, elite_frac=0.1, iters=3):
     elites = int(pop * elite_frac)
     mean = torch.zeros(horizon, act_dim, device=z0.device)
     std = torch.ones_like(mean) * 0.5
@@ -82,49 +95,110 @@ def cem_plan(model, value_fn, z0, act_dim, horizon=10, pop=512, elite_frac=0.1, 
 class TD_MPC2_Agent:
     def __init__(self, obs_dim, act_dim, device="cpu"):
         self.device = torch.device(device)
-        self.wm = WorldModel(obs_dim, act_dim, latent_dim=32, hid=128).to(self.device)
-        self.val = ValueNet(32, hid=128).to(self.device)
-        self.actor = Actor(32, act_dim, hid=128).to(self.device)
-        self.opt = optim.Adam(
-            list(self.wm.parameters()) + list(self.val.parameters()) + list(self.actor.parameters()),
-            lr=1e-4
-        )
-        self.gamma = 0.90
+        self.wm = WorldModel(obs_dim, act_dim).to(self.device)
+        self.val = ValueNet(64).to(self.device)
+        self.actor = Actor(64, act_dim).to(self.device)
+        self.opt = optim.Adam(list(self.wm.parameters()) + list(self.val.parameters()), lr=3e-4)
+        self.actor_opt = optim.Adam(self.actor.parameters(), lr=3e-4)
+        self.gamma = 0.99
+
     def plan(self, obs):
         z0 = self.wm.encode(torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0))
         return cem_plan(self.wm, self.val, z0, act_dim=self.actor.net[-1].out_features // 2).cpu().numpy()
 
+    # def update(self, batch):
+    #     o, a, r, d, o2 = [x.to(self.device).float() for x in batch]
+    #     z, z2 = self.wm.encode(o), self.wm.encode(o2)
+    #     z_pred, r_pred = self.wm.predict(z, a)
+    #     model_loss = (z_pred - z2.detach()).pow(2).mean() + (r_pred - r).pow(2).mean()
+    #
+    #     with torch.no_grad():
+    #         v_target = r + self.gamma * (1 - d) * self.val(z2)
+    #     v_loss = (self.val(z) - v_target).pow(2).mean()
+    #
+    #     loss = model_loss + v_loss
+    #     self.opt.zero_grad()
+    #     loss.backward()
+    #     self.opt.step()
+    #     return loss.item()
+
+    # adding the actor training:
     def update(self, batch):
         o, a, r, d, o2 = [x.to(self.device).float() for x in batch]
-        z, z2 = self.wm.encode(o), self.wm.encode(o2)
+
+        # --- Encode observations ---
+        #z, z2 = self.wm.encode(o), self.wm.encode(o2)
+        #adding augjenrtation
+        noise_std = 0.01
+        o_aug = o + noise_std * torch.randn_like(o)
+        o2_aug = o2 + noise_std * torch.randn_like(o2)
+
+        z, z2 = self.wm.encode(o_aug), self.wm.encode(o2_aug)
+
+        # --- World model predictions ---
         z_pred, r_pred = self.wm.predict(z, a)
 
-        r_clipped = torch.clamp(r, -1.0, 1.0)
+        # --- Contrastive representation loss ---
+        contrast_loss = contrastive_loss(z_pred, z2.detach())
 
-        z_mse = F.mse_loss(z_pred, z2.detach())
-        r_mse = F.mse_loss(r_pred, r)
-        model_loss = z_mse + 0.5 * r_mse
+        # --- World model loss (latent + reward prediction) ---
+        #model_loss = (z_pred - z2.detach()).pow(2).mean() + (r_pred - r).pow(2).mean()
+        model_loss = (z_pred - z2.detach()).pow(2).mean() + (r_pred - r).pow(2).mean() + 0.1 * contrast_loss
+
+        # --- Value loss (1-step TD target) ---
         with torch.no_grad():
-            v_target = r + self.gamma * (1 - d) * self.val(z2)
-            v_target = torch.clamp(v_target, -5.0, 5.0)
-        v_loss = F.smooth_l1_loss(self.val(z), v_target)
+            v_next = self.val(z2)
+            v_target = r + self.gamma * (1 - d) * (v_next - 0.01 * v_next.pow(2))
+        v_loss = (self.val(z) - v_target).pow(2).mean()
 
-        loss = model_loss + v_loss
-
+        # --- Optimize world model + value ---
+        total_loss = model_loss + v_loss
         self.opt.zero_grad(set_to_none=True)
-        loss.backward()
-
+        total_loss.backward()
         self.opt.step()
 
-        metrics = {
-            "loss": float(loss.item()),
-            "model_loss": float(model_loss.item()),
-            "z_mse": float(z_mse.item()),
-            "r_mse": float(r_mse.item()),
-            "v_loss": float(v_loss.item()),
-            "val_mean": float(self.val(z).mean().item()),
+        # --- Imagination rollouts ---
+        horizon_imagine = 3
+        z_im = z.detach()
+        returns_im = torch.zeros_like(r)
+        for t in range(horizon_imagine):
+            a_im, _ = self.actor(z_im)
+            z_im, r_im = self.wm.predict(z_im, a_im)
+            returns_im += (self.gamma ** t) * r_im
+        v_im_loss = (self.val(z.detach()) - returns_im.detach()).pow(2).mean()
+
+        self.opt.zero_grad(set_to_none=True)
+        v_im_loss.backward()
+        self.opt.step()
+
+        # --- Actor learning (imitation + value maximization) ---
+        with torch.no_grad():
+            # pick a random latent from the batch and plan an MPC teacher action
+            idx = torch.randint(0, z.size(0), (1,))
+            a_mpc = cem_plan(self.wm, self.val, z[idx].detach(), act_dim=a.shape[-1])
+
+        # detach everything for independent gradient flow
+        z_actor = z.detach()
+        a_mpc = a_mpc.detach()
+
+        a_actor, _ = self.actor(z_actor)
+        imit_loss = (a_actor - a_mpc).pow(2).mean()
+        value_loss = -self.val(z_actor.detach()).mean()
+        actor_loss = imit_loss + 0.1 * value_loss
+
+        # optimize actor separately
+        self.actor_opt.zero_grad(set_to_none=True)
+        actor_loss.backward()
+        self.actor_opt.step()
+
+        # --- Return all loss terms for logging ---
+        return {
+            "total_loss": total_loss.item(),
+            "model_loss": model_loss.item(),
+            "v_loss": v_loss.item(),
+            "actor_loss": actor_loss.item()
         }
-        return metrics
+
     # --- Checkpoint helpers ---
     def state_dict(self):
         """Collect all model and optimizer weights for checkpointing."""
