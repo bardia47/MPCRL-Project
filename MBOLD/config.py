@@ -13,7 +13,7 @@ latent_dim = 64
 action_dim = 2
 
 batch_size = 128
-epochs = 40
+epochs = 10
 lr = 1e-4
 
 planning_horizon = 12
