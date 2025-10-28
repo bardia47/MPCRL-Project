@@ -1,274 +1,195 @@
+import os
 import numpy as np
 import torch
-import gymnasium as gym
-import highway_env
 import matplotlib.pyplot as plt
-import cv2
-from config import device, planning_horizon, cem_iters, cem_pop, cem_elite_frac
-from utils import preprocess_image, load_buffer
-from train_distance import EncoderCNN, ForwardDynamics
+from config import device, planning_horizon, cem_iters, cem_pop, cem_elite_frac, seed, models_dir
+from env_utils import make_env, obs_to_state
+from models import ForwardDynamics
+from planning import CEMPlannerState, success_state
 
 
-class CEMPlanner:
-    def __init__(self, forward_model, encoder, action_low, action_high, action_dim):
-        self.fwd = forward_model
-        self.enc = encoder
-        self.action_dim = action_dim
-        self.low = action_low
-        self.high = action_high
-
-    # python
-    def plan(self, z0, zg, horizon=12, iters=5, pop=512, elite_frac=0.05):
-        if hasattr(self, 'prev_solution') and self.prev_solution.shape[0] == horizon:
-            mean = np.roll(self.prev_solution, -1, axis=0)
-        else:
-            mean = np.zeros((horizon, self.action_dim), dtype=np.float32)
-
-        std = np.ones_like(mean) * 0.5
-        n_elite = max(1, int(pop * elite_frac))
-
-        for iteration in range(iters):
-            noise_scale = max(0.1, 1.0 - iteration / iters)
-            samples = np.random.randn(pop, horizon, self.action_dim).astype(np.float32) * std * noise_scale + mean
-            samples = np.clip(samples, self.low, self.high)
-
-            costs = self.evaluate_sequences(samples, z0, zg, horizon)
-            elite_idx = costs.argsort()[:n_elite]
-            elites = samples[elite_idx]
-            mean = elites.mean(axis=0)
-            std = elites.std(axis=0) + 1e-6
-
-        self.prev_solution = mean
-        return mean[0]
-    # python
-    def evaluate_sequences(self, sequences, z0, zg, horizon):
-        pop = sequences.shape[0]
-        zs = torch.tensor(z0, dtype=torch.float32, device=device).unsqueeze(0).repeat(pop, 1)
-        zg_t = torch.tensor(zg, dtype=torch.float32, device=device).unsqueeze(0).repeat(pop, 1)
-
-        seq_torch = torch.tensor(sequences, dtype=torch.float32, device=device)  # [pop, H, act_dim]
-        costs = torch.zeros(pop, device=device)
-        a_prev = torch.zeros(pop, self.action_dim, device=device)
-
-        with torch.no_grad():
-            for t in range(horizon):
-                a_t = seq_torch[:, t, :]
-                zs = self.fwd(zs, a_t)
-
-                step_cost = 0.05 * torch.norm(zs - zg_t, dim=-1)
-                costs += step_cost
-
-                costs += 0.01 * torch.norm(a_t, dim=-1)
-                costs += 0.05 * torch.norm(a_t - a_prev, dim=-1)
-                a_prev = a_t
-
-            terminal_cost = torch.norm(zs - zg_t, dim=-1)
-            costs += terminal_cost
-
-        return costs.cpu().numpy()
-
-def create_proper_goal(env):
-    """Create a proper parking goal that's different from initial state"""
-
-    print("Creating proper goal state...")
-
-    # Method 1: Create goal by moving to a specific parking spot
-    obs, info = env.reset()
-
-    # Save initial state
-    initial_img = env.render()
-    if initial_img is None:
-        initial_img = env.render(mode="rgb_array")
-
-    print("Initial state captured")
-
-    # Execute specific parking sequence
-    parking_sequence = [
-        [-0.5,  1.0],  # steering right, accel forward
-        [-0.5,  1.0],
-        [ 0.8,  0.5],  # steering left, accel slow forward
-        [ 0.8,  0.5],
-        [ 0.0, -0.5],  # straight, reverse
-        [ 0.0, -0.5],
-        [ 0.0,  0.0],  # stop
+def create_goal_state(env):
+    obs, _ = env.reset()
+    sequence = [
+        [-0.5, 1.0],
+        [-0.5, 1.0],
+        [0.8, 0.5],
+        [0.8, 0.5],
+        [0.0, -0.5],
+        [0.0, -0.5],
+        [0.0, 0.0],
     ]
-    for i, action in enumerate(parking_sequence):
-        env.step(action)
-        print(f"Parking step {i + 1}/{len(parking_sequence)}")
 
-    # Get goal state
-    goal_img = env.render()
-    if goal_img is None:
-        goal_img = env.render(mode="rgb_array")
+    valid_goal = False
+    for a in sequence:
+        obs, _, terminated, truncated, info = env.step(a)
+        if terminated:
+            if 'success' in info and info['success']:
+                valid_goal = True
+            break
+        if truncated:
+            break
 
-    print("Goal state created")
-
-    # Verify goal is different from initial
-    initial_processed = preprocess_image(initial_img)
-    goal_processed = preprocess_image(goal_img)
-
-    difference = torch.norm(initial_processed - goal_processed).item()
-    print(f"Image difference between initial and goal: {difference:.3f}")
-
-    if difference < 0.1:
-        print("WARNING: Goal too similar to initial state!")
-
-        # Create more different goal
-        for _ in range(10):
-            env.step([1.0, 1.0])  # More aggressive movement
-
-        goal_img = env.render()
-        if goal_img is None:
-            goal_img = env.render(mode="rgb_array")
-
-        goal_processed = preprocess_image(goal_img)
-        difference = torch.norm(initial_processed - goal_processed).item()
-        print(f"New goal difference: {difference:.3f}")
-
-    return goal_img, initial_img
+    goal_state = obs_to_state(obs)
+    print(f"Goal generation {'SUCCESS' if valid_goal else 'FAILED'}")
+    return goal_state
 
 
-def run_episode_with_visualization(env, planner, enc, z_goal, episode_num, show_render=True):
-    """Run episode with visual rendering"""
+def debug_environment(env):
+    """Debug environment details"""
+    print("\n=== ENVIRONMENT DEBUG ===")
+    print(f"Action space: {env.action_space}")
+    print(f"Action bounds: low={env.action_space.low}, high={env.action_space.high}")
+    print(f"Observation space: {env.observation_space}")
 
-    obs, info = env.reset()
+    # Test a big action
+    obs, _ = env.reset()
+    s_before = obs_to_state(obs)
+    print(f"State before big action: {np.round(s_before, 3)}")
 
-    trajectory_distances = []
-    frames = []
+    big_action = np.array([1.0, 1.0])  # Max action
+    obs, _, _, _, _ = env.step(big_action)
+    s_after = obs_to_state(obs)
+    print(f"State after big action [1,1]: {np.round(s_after, 3)}")
+    print(f"State change: {np.round(s_after - s_before, 3)}")
+
+
+def test_forward_dynamics(fwd, device):
+    """Test if forward dynamics work"""
+    print("\n=== FORWARD DYNAMICS TEST ===")
+
+    # Test state
+    test_state = np.array([0., 0., 0., 0., -0.989, 0.15])
+    test_action = np.array([1.0, 1.0])  # Big action
+
+    with torch.no_grad():
+        s_tensor = torch.FloatTensor(test_state).unsqueeze(0).to(device)
+        a_tensor = torch.FloatTensor(test_action).unsqueeze(0).to(device)
+        next_state = fwd(s_tensor, a_tensor).cpu().numpy()[0]
+
+    print(f"Input state: {np.round(test_state, 3)}")
+    print(f"Input action: {test_action}")
+    print(f"Predicted next state: {np.round(next_state, 3)}")
+    print(f"State change by model: {np.round(next_state - test_state, 3)}")
+
+
+def run_episode_with_bold_actions(env, planner, sg, episode_num):
+    """Run episode with more aggressive actions"""
+    obs, _ = env.reset(seed=seed + episode_num)
+    s = obs_to_state(obs)
+    print(f'\n=== Episode {episode_num + 1} BOLD VERSION ===')
+    print(f'Start state: {np.round(s, 3)}')
+    print(f'Goal state:  {np.round(sg, 3)}')
+    print(f'Distance to goal: {np.linalg.norm(s - sg):.3f}')
+
+    trajectory = [s[:2].copy()]
+    actions_taken = []
+    planner.prev_solution = None
     success = False
 
-    print(f"\nEpisode {episode_num} started...")
-
-    for t in range(200):
-        # Get current frame for visualization
-        raw = env.render()
-        if raw is None:
-            raw = env.render(mode="rgb_array")
-
-        # Store frame for video
-        frames.append(raw.copy())
-
-        # Process for model
-        cur_img = preprocess_image(raw).unsqueeze(0).to(device)
-
-        with torch.no_grad():
-            z_cur = enc(cur_img).squeeze(0).cpu().numpy()
-            distance = np.linalg.norm(z_cur - z_goal)
-
-        trajectory_distances.append(distance)
-
-
-        # Print progress
-        if t % 10 == 0:
-            print(f"  Step {t:3d}: Distance = {distance:.3f}")
-
-        # Check success
-        if distance < 0.001:  # Reasonable threshold
-            print(f"  SUCCESS at step {t}! Distance: {distance:.3f}")
+    for t in range(100):  # More steps
+        if success_state(s, sg):
+            print(f'Episode {episode_num + 1}: SUCCESS at step {t}')
             success = True
             break
 
         # Plan action
-        a = planner.plan(z_cur, z_goal,
-                         horizon=planning_horizon,
-                         iters=cem_iters,
-                         pop=cem_pop,
-                         elite_frac=cem_elite_frac)
+        a = planner.plan(s, sg,
+                         horizon=planning_horizon, iters=cem_iters,
+                         pop=cem_pop, elite_frac=cem_elite_frac,
+                         device=device)
 
-        # Execute action
-        obs_step = env.step(a)
-        try:
-            obs_next, reward, terminated, truncated, info = obs_step
-            done = terminated or truncated
-        except:
-            done = False
+        # 🔥 Make actions more aggressive if far from goal
+        distance_to_goal = np.linalg.norm(s[:2] - sg[:2])
+        if distance_to_goal > 0.1:  # If far from goal
+            # Scale up actions
+            a = a * 2.0  # Double the actions!
+            a = np.clip(a, env.action_space.low, env.action_space.high)
 
-        if done:
-            print(f"  Episode terminated at step {t}")
+        print(f"Step {t}: distance={distance_to_goal:.3f}, action={np.round(a, 3)}")
+
+        obs, _, terminated, truncated, info = env.step(a)
+        s = obs_to_state(obs)
+
+        trajectory.append(s[:2].copy())
+        actions_taken.append(a.copy())
+
+        if terminated or truncated:
+            reason = "success" if (terminated and 'success' in info and info['success']) else "failure"
+            if reason == "success":
+                success = True
             break
+    else:
+        print(f'Episode {episode_num + 1}: Completed {t + 1} steps')
 
-    min_distance = min(trajectory_distances) if trajectory_distances else float('inf')
+    # Plot results
+    trajectory = np.array(trajectory)
+    actions_taken = np.array(actions_taken)
 
-    if not success:
-        print(f"  FAILED - Min distance: {min_distance:.3f}")
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
 
-    return {
-        'success': success,
-        'steps': t + 1,
-        'min_distance': min_distance,
-        'trajectory': trajectory_distances,
-        'frames': frames
-    }
+    # Trajectory plot
+    ax1.plot(trajectory[:, 0], trajectory[:, 1], 'b-o', linewidth=2, markersize=3)
+    ax1.scatter(trajectory[0, 0], trajectory[0, 1], color='green', s=150, marker='s', label='Start')
+    ax1.scatter(sg[0], sg[1], color='red', s=150, marker='*', label='Goal')
+    ax1.set_xlabel('X Position')
+    ax1.set_ylabel('Y Position')
+    ax1.set_title(f'Episode {episode_num + 1} - Bold Actions')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    ax1.axis('equal')
 
+    # Actions plot
+    if len(actions_taken) > 0:
+        steps = range(len(actions_taken))
+        ax2.plot(steps, actions_taken[:, 0], 'r-o', label='Steering', markersize=3)
+        ax2.plot(steps, actions_taken[:, 1], 'b-o', label='Throttle', markersize=3)
+        ax2.axhline(y=1.0, color='gray', linestyle='--', alpha=0.5)
+        ax2.axhline(y=-1.0, color='gray', linestyle='--', alpha=0.5)
+        ax2.set_xlabel('Step')
+        ax2.set_ylabel('Action Value')
+        ax2.set_title('Bold Actions Taken')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
 
-def save_episode_video(frames, filename, fps=10):
-    """Save episode as video"""
-    if not frames:
-        return
+    plt.tight_layout()
+    plt.savefig(f'bold_episode_{episode_num + 1}.png', dpi=150, bbox_inches='tight')
+    plt.show()
 
-    height, width, channels = frames[0].shape
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(filename, fourcc, fps, (width, height))
-
-    for frame in frames:
-        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        out.write(frame_bgr)
-
-    out.release()
-    print(f"Video saved: {filename}")
+    return success
 
 
 if __name__ == '__main__':
-    print("Loading models...")
-    enc = EncoderCNN().to(device)
-    fwd = ForwardDynamics(latent_dim=64, action_dim=2).to(device)
-    enc.load_state_dict(torch.load('models/encoder.pth', map_location=device))
-    fwd.load_state_dict(torch.load('models/forward.pth', map_location=device))
-    enc.eval();
+    print('Setting up environments...')
+    env = make_env(render=True)
+    env_goal = make_env()
+
+    env.reset(seed=seed)
+    env_goal.reset(seed=seed + 1000)
+
+    # Debug environment first
+    debug_environment(env)
+
+    print('Loading dynamics model...')
+    fwd = ForwardDynamics().to(device)
+    model_path = os.path.join(models_dir, 'fwd_state.pth')
+    fwd.load_state_dict(torch.load(model_path, map_location=device))
     fwd.eval()
 
-    print("Setting up environment...")
-    env = gym.make('parking-v0', render_mode="rgb_array")
-    env.unwrapped.configure({"simulation_frequency": 15})
+    # Test forward dynamics
+    test_forward_dynamics(fwd, device)
 
     act_low, act_high = env.action_space.low, env.action_space.high
-    planner = CEMPlanner(fwd, enc, act_low, act_high, env.action_space.shape[0])
+    planner = CEMPlannerState(fwd, act_low, act_high, action_dim=env.action_space.shape[0])
 
-    # Create PROPER goal (not from buffer!)
-    goal_img, initial_img = create_proper_goal(env)
+    sg = create_goal_state(env_goal)
+    print('Goal state:', np.round(sg, 3))
 
-    with torch.no_grad():
-        z_goal = enc(preprocess_image(goal_img).unsqueeze(0).to(device)).squeeze(0).cpu().numpy()
+    # Run just one episode with full debugging
+    print("\n=== RUNNING ONE EPISODE WITH FULL DEBUG ===")
+    success = run_episode_with_bold_actions(env, planner, sg, 0)
 
-    results = []
-    num_episodes = 3  # Fewer episodes for visualization
-
-    for ep in range(num_episodes):
-        episode_result = run_episode_with_visualization(
-            env, planner, enc, z_goal, ep + 1, show_render=True
-        )
-        results.append(episode_result)
-
-        # Save video of episode
-        save_episode_video(
-            episode_result['frames'],
-            f'episode_{ep + 1}.mp4'
-        )
+    print(f'\nResult: {"SUCCESS" if success else "FAILED"}')
 
     env.close()
-
-    # Analyze results
-    success_count = sum(1 for r in results if r['success'])
-    success_rate = success_count / num_episodes
-
-    print("\n" + "=" * 50)
-    print("FINAL RESULTS:")
-    print("=" * 50)
-    print(f"Success Rate: {success_count}/{num_episodes} = {success_rate * 100:.1f}%")
-
-    if success_rate < 1.0:
-        avg_min_distance = np.mean([r['min_distance'] for r in results])
-        print(f"Average Min Distance: {avg_min_distance:.3f}")
-        print("This looks more realistic!")
-    else:
-        print("If still 100% success, check goal creation!")
+    env_goal.close()
