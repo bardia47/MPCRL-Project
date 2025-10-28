@@ -1,0 +1,86 @@
+seed: ${overrides.seed}
+device: cpu
+log_frequency_agent: 1000
+save_video: false
+debug_mode: false
+experiment: default
+root_dir: ./exp
+algorithm:
+  name: pets
+  agent:
+    _target_: mbrl.planning.TrajectoryOptimizerAgent
+    _recursive_: false
+    action_lb: ???
+    action_ub: ???
+    planning_horizon: ${overrides.planning_horizon}
+    optimizer_cfg: ${action_optimizer}
+    replan_freq: 1
+    verbose: ${debug_mode}
+  normalize: true
+  normalize_double_precision: true
+  target_is_delta: true
+  initial_exploration_steps: ${overrides.initial_exploration}
+  freq_train_model: ${overrides.freq_train_model}
+  learned_rewards: ${overrides.learned_rewards}
+  num_particles: 20
+dynamics_model:
+  _target_: mbrl.models.GaussianMLP
+  _recursive_: false
+  device: ${device}
+  num_layers: 4
+  in_size: ???
+  out_size: ???
+  ensemble_size: 7
+  hid_size: ${overrides.hidden_size}
+  deterministic: false
+  propagation_method: random_model
+  learn_logvar_bounds: false
+  activation_fn_cfg:
+    _target_: torch.nn.SiLU
+overrides:
+  env: parking
+  env_params: {}
+  term_fn: null
+  reward_fn: null
+  goal_proj_fn: null
+  seed: 0
+  trial_length: 150
+  learned_rewards: false
+  save_video: false
+  hidden_size: 200
+  grow_buffer: true
+  num_steps: 1000
+  model_lr: 0.001
+  model_wd: 0.0001
+  cost_discount: 1.0
+  cost_aggregation: sum
+  planning_horizon: 15
+  cem_num_iters: 5
+  cem_elite_ratio: 0.1
+  cem_population_size: 500
+  cem_population_decay_factor: 1.0
+  cem_colored_noise_exponent: 0.5
+  cem_keep_elite_frac: 0.0
+  cem_alpha: 0.1
+  acting_module: null
+  model_load_dir: null
+  model_batch_size: 256
+  model_train_freq: 250
+  max_rollout_length: 150
+  normalize_observations: true
+  normalize_actions: true
+  use_termination_fn: true
+action_optimizer:
+  _target_: mbrl.planning.ICEMOptimizer
+  num_iterations: ${overrides.cem_num_iters}
+  elite_ratio: ${overrides.cem_elite_ratio}
+  population_size: ${overrides.cem_population_size}
+  population_decay_factor: ${overrides.cem_population_decay_factor}
+  colored_noise_exponent: ${overrides.cem_colored_noise_exponent}
+  keep_elite_frac: ${overrides.cem_keep_elite_frac}
+  alpha: ${overrides.cem_alpha}
+  lower_bound: ???
+  upper_bound: ???
+  return_mean_elites: true
+  population_size_module: ${dynamics_model.ensemble_size}
+  device: ${device}
