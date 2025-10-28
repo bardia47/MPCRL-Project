@@ -8,167 +8,219 @@ from models import ForwardDynamics
 from planning import CEMPlannerState, success_state
 
 
-def create_goal_state(env):
+def debug_parking_environment(env):
+    """Debug parking environment specifics"""
+    print("\n=== PARKING ENVIRONMENT DEBUG ===")
+
+    # Get environment info
+    obs, info = env.reset()
+    print(f"Initial observation: {obs}")
+    print(f"Environment info: {info}")
+
+    # Check environment config
+    if hasattr(env.unwrapped, 'config'):
+        print(f"Environment config: {env.unwrapped.config}")
+
+    # Get state
+    s = obs_to_state(obs)
+    print(f"Initial state: {s}")
+    print(f"Initial position: [{s[0]:.3f}, {s[1]:.3f}]")
+    print(f"Initial velocity: [{s[2]:.3f}, {s[3]:.3f}]")
+    print(f"Initial heading: [{s[4]:.3f}, {s[5]:.3f}] (sin, cos)")
+
+    # Test different actions to see movement scale
+    print("\n--- Testing Action Effects ---")
+    test_actions = [
+        [0.0, 0.0],  # No action
+        [0.1, 0.1],  # Small action
+        [0.5, 0.5],  # Medium action
+        [1.0, 1.0],  # Max action
+    ]
+
+    for i, action in enumerate(test_actions):
+        env.reset()
+        obs_before, _ = env.reset()
+        s_before = obs_to_state(obs_before)
+
+        obs_after, _, _, _, _ = env.step(np.array(action))
+        s_after = obs_to_state(obs_after)
+
+        pos_change = np.linalg.norm(s_after[:2] - s_before[:2])
+        vel_change = np.linalg.norm(s_after[2:4] - s_before[2:4])
+
+        print(f"Action {action}: pos_change={pos_change:.4f}, vel_change={vel_change:.4f}")
+
+
+def create_better_goal_state(env):
+    """Create goal state with environment understanding"""
+    print("\n=== CREATING BETTER GOAL STATE ===")
     obs, _ = env.reset()
+
     sequence = [
-        [-0.5, 1.0],
-        [-0.5, 1.0],
-        [0.8, 0.5],
-        [0.8, 0.5],
-        [0.0, -0.5],
-        [0.0, -0.5],
+        [-0.2, 0.3],  # More conservative actions
+        [-0.2, 0.3],
+        [0.3, 0.2],
+        [0.3, 0.2],
+        [0.0, -0.2],
+        [0.0, -0.2],
+        [0.0, 0.0],
         [0.0, 0.0],
     ]
 
+    print("Executing goal sequence:")
     valid_goal = False
-    for a in sequence:
+    for i, a in enumerate(sequence):
         obs, _, terminated, truncated, info = env.step(a)
+        state = obs_to_state(obs)
+        print(f"  Step {i + 1}: action={a}, pos=[{state[0]:.3f}, {state[1]:.3f}]")
+
         if terminated:
-            if 'success' in info and info['success']:
-                valid_goal = True
+            print(f"  Terminated at step {i + 1}: {info}")
+            valid_goal = 'success' in info and info['success']
             break
         if truncated:
+            print(f"  Truncated at step {i + 1}")
             break
 
     goal_state = obs_to_state(obs)
     print(f"Goal generation {'SUCCESS' if valid_goal else 'FAILED'}")
+    print(f"Final goal state: {np.round(goal_state, 3)}")
     return goal_state
 
 
-def debug_environment(env):
-    """Debug environment details"""
-    print("\n=== ENVIRONMENT DEBUG ===")
-    print(f"Action space: {env.action_space}")
-    print(f"Action bounds: low={env.action_space.low}, high={env.action_space.high}")
-    print(f"Observation space: {env.observation_space}")
-
-    # Test a big action
-    obs, _ = env.reset()
-    s_before = obs_to_state(obs)
-    print(f"State before big action: {np.round(s_before, 3)}")
-
-    big_action = np.array([1.0, 1.0])  # Max action
-    obs, _, _, _, _ = env.step(big_action)
-    s_after = obs_to_state(obs)
-    print(f"State after big action [1,1]: {np.round(s_after, 3)}")
-    print(f"State change: {np.round(s_after - s_before, 3)}")
-
-
-def test_forward_dynamics(fwd, device):
-    """Test if forward dynamics work"""
-    print("\n=== FORWARD DYNAMICS TEST ===")
-
-    # Test state
-    test_state = np.array([0., 0., 0., 0., -0.989, 0.15])
-    test_action = np.array([1.0, 1.0])  # Big action
-
-    with torch.no_grad():
-        s_tensor = torch.FloatTensor(test_state).unsqueeze(0).to(device)
-        a_tensor = torch.FloatTensor(test_action).unsqueeze(0).to(device)
-        next_state = fwd(s_tensor, a_tensor).cpu().numpy()[0]
-
-    print(f"Input state: {np.round(test_state, 3)}")
-    print(f"Input action: {test_action}")
-    print(f"Predicted next state: {np.round(next_state, 3)}")
-    print(f"State change by model: {np.round(next_state - test_state, 3)}")
-
-
-def run_episode_with_bold_actions(env, planner, sg, episode_num):
-    """Run episode with more aggressive actions"""
+def run_episode_with_parking_debug(env, planner, sg, episode_num):
+    """Run episode with parking-specific debugging"""
     obs, _ = env.reset(seed=seed + episode_num)
     s = obs_to_state(obs)
-    print(f'\n=== Episode {episode_num + 1} BOLD VERSION ===')
-    print(f'Start state: {np.round(s, 3)}')
-    print(f'Goal state:  {np.round(sg, 3)}')
-    print(f'Distance to goal: {np.linalg.norm(s - sg):.3f}')
 
-    trajectory = [s[:2].copy()]
+    print(f'\n=== Episode {episode_num + 1} PARKING DEBUG ===')
+    print(f'Start position: [{s[0]:.3f}, {s[1]:.3f}]')
+    print(f'Goal position:  [{sg[0]:.3f}, {sg[1]:.3f}]')
+    print(f'Distance: {np.linalg.norm(s[:2] - sg[:2]):.4f}')
+
+    trajectory = []
     actions_taken = []
+    distances = []
     planner.prev_solution = None
     success = False
 
-    for t in range(100):  # More steps
+    for t in range(150):  # More steps for parking
+        # Record current state
+        trajectory.append(s[:2].copy())
+        distance = np.linalg.norm(s[:2] - sg[:2])
+        distances.append(distance)
+
+        # Check success
         if success_state(s, sg):
-            print(f'Episode {episode_num + 1}: SUCCESS at step {t}')
+            print(f'🎉 Episode {episode_num + 1}: SUCCESS at step {t}')
             success = True
             break
 
         # Plan action
-        a = planner.plan(s, sg,
-                         horizon=planning_horizon, iters=cem_iters,
-                         pop=cem_pop, elite_frac=cem_elite_frac,
-                         device=device)
+        a = planner.plan(s, sg, horizon=planning_horizon, iters=cem_iters,
+                         pop=cem_pop, elite_frac=cem_elite_frac, device=device)
 
-        # 🔥 Make actions more aggressive if far from goal
-        distance_to_goal = np.linalg.norm(s[:2] - sg[:2])
-        if distance_to_goal > 0.1:  # If far from goal
-            # Scale up actions
-            a = a * 2.0  # Double the actions!
-            a = np.clip(a, env.action_space.low, env.action_space.high)
 
-        print(f"Step {t}: distance={distance_to_goal:.3f}, action={np.round(a, 3)}")
+        if distance > 1.0:
+            a = a * 1.5  # Medium boost for far distances
+        elif distance > 0.5:
+            a = a * 1.0  # Normal actions
+        else:
+            a = a * 0.5  # Careful actions when close
 
+        a = np.clip(a, env.action_space.low, env.action_space.high)
+        actions_taken.append(a.copy())
+
+        # Execute action
         obs, _, terminated, truncated, info = env.step(a)
         s = obs_to_state(obs)
 
-        trajectory.append(s[:2].copy())
-        actions_taken.append(a.copy())
+        # Debug output
+        if t % 20 == 0 or distance < 0.1:
+            print(f"Step {t:3d}: pos=[{s[0]:.3f}, {s[1]:.3f}], "
+                  f"dist={distance:.4f}, action=[{a[0]:.3f}, {a[1]:.3f}]")
 
+        # Check termination
         if terminated or truncated:
-            reason = "success" if (terminated and 'success' in info and info['success']) else "failure"
-            if reason == "success":
+            if terminated and 'success' in info and info['success']:
+                print(f'🎉 ENV SUCCESS at step {t}')
                 success = True
+            else:
+                print(f'Episode terminated: {info}')
             break
-    else:
-        print(f'Episode {episode_num + 1}: Completed {t + 1} steps')
 
-    # Plot results
+    # Enhanced plotting
     trajectory = np.array(trajectory)
     actions_taken = np.array(actions_taken)
+    distances = np.array(distances)
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
 
-    # Trajectory plot
-    ax1.plot(trajectory[:, 0], trajectory[:, 1], 'b-o', linewidth=2, markersize=3)
-    ax1.scatter(trajectory[0, 0], trajectory[0, 1], color='green', s=150, marker='s', label='Start')
-    ax1.scatter(sg[0], sg[1], color='red', s=150, marker='*', label='Goal')
-    ax1.set_xlabel('X Position')
-    ax1.set_ylabel('Y Position')
-    ax1.set_title(f'Episode {episode_num + 1} - Bold Actions')
+    # 1. Trajectory plot
+    ax1.plot(trajectory[:, 0], trajectory[:, 1], 'b-', linewidth=2, alpha=0.7)
+    ax1.scatter(trajectory[0, 0], trajectory[0, 1], color='green', s=150,
+                marker='s', label='Start', zorder=5)
+    ax1.scatter(sg[0], sg[1], color='red', s=200, marker='*', label='Goal', zorder=5)
+
+    # Add distance circles
+    circles = [0.1, 0.5, 1.0]
+    for r in circles:
+        circle = plt.Circle((sg[0], sg[1]), r, fill=False, alpha=0.3,
+                            linestyle='--', label=f'{r}m radius')
+        ax1.add_patch(circle)
+
+    ax1.set_xlabel('X Position (m)')
+    ax1.set_ylabel('Y Position (m)')
+    ax1.set_title('Parking Trajectory')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     ax1.axis('equal')
 
-    # Actions plot
+    # 2. Distance over time
+    ax2.plot(distances, 'g-', linewidth=2)
+    ax2.set_xlabel('Step')
+    ax2.set_ylabel('Distance to Goal (m)')
+    ax2.set_title('Distance Progress')
+    ax2.grid(True, alpha=0.3)
+    ax2.axhline(y=0.1, color='r', linestyle='--', alpha=0.5, label='Close threshold')
+    ax2.legend()
+
+    # 3. Actions over time
     if len(actions_taken) > 0:
         steps = range(len(actions_taken))
-        ax2.plot(steps, actions_taken[:, 0], 'r-o', label='Steering', markersize=3)
-        ax2.plot(steps, actions_taken[:, 1], 'b-o', label='Throttle', markersize=3)
-        ax2.axhline(y=1.0, color='gray', linestyle='--', alpha=0.5)
-        ax2.axhline(y=-1.0, color='gray', linestyle='--', alpha=0.5)
-        ax2.set_xlabel('Step')
-        ax2.set_ylabel('Action Value')
-        ax2.set_title('Bold Actions Taken')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
+        ax3.plot(steps, actions_taken[:, 0], 'r-', label='Steering', linewidth=2)
+        ax3.plot(steps, actions_taken[:, 1], 'b-', label='Acceleration', linewidth=2)
+        ax3.axhline(y=1.0, color='gray', linestyle='--', alpha=0.5)
+        ax3.axhline(y=-1.0, color='gray', linestyle='--', alpha=0.5)
+        ax3.set_xlabel('Step')
+        ax3.set_ylabel('Action Value')
+        ax3.set_title('Actions Over Time')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+
+    # 4. Velocity profile
+    velocities = [np.linalg.norm(pos[2:4]) for pos in [obs_to_state(env.reset()[0])]]  # اینو بهتر implement کن
+    ax4.set_title('Velocity Profile (placeholder)')
+    ax4.text(0.5, 0.5, 'Velocity data needs\nproper implementation',
+             ha='center', va='center', transform=ax4.transAxes)
 
     plt.tight_layout()
-    plt.savefig(f'bold_episode_{episode_num + 1}.png', dpi=150, bbox_inches='tight')
+    plt.savefig(f'parking_debug_{episode_num + 1}.png', dpi=150, bbox_inches='tight')
     plt.show()
 
     return success
 
 
 if __name__ == '__main__':
-    print('Setting up environments...')
+    print('Setting up parking environment...')
     env = make_env(render=True)
     env_goal = make_env()
 
     env.reset(seed=seed)
     env_goal.reset(seed=seed + 1000)
 
-    # Debug environment first
-    debug_environment(env)
+    # Debug parking environment
+    debug_parking_environment(env)
 
     print('Loading dynamics model...')
     fwd = ForwardDynamics().to(device)
@@ -176,20 +228,16 @@ if __name__ == '__main__':
     fwd.load_state_dict(torch.load(model_path, map_location=device))
     fwd.eval()
 
-    # Test forward dynamics
-    test_forward_dynamics(fwd, device)
-
     act_low, act_high = env.action_space.low, env.action_space.high
     planner = CEMPlannerState(fwd, act_low, act_high, action_dim=env.action_space.shape[0])
 
-    sg = create_goal_state(env_goal)
-    print('Goal state:', np.round(sg, 3))
+    # Create better goal
+    sg = create_better_goal_state(env_goal)
 
-    # Run just one episode with full debugging
-    print("\n=== RUNNING ONE EPISODE WITH FULL DEBUG ===")
-    success = run_episode_with_bold_actions(env, planner, sg, 0)
+    # Run with parking-specific debug
+    print("\n=== RUNNING PARKING EPISODE ===")
+    success = run_episode_with_parking_debug(env, planner, sg, 0)
 
     print(f'\nResult: {"SUCCESS" if success else "FAILED"}')
-
     env.close()
     env_goal.close()
