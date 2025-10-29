@@ -1,13 +1,33 @@
 import torch
 from torch import nn
-
-class ForwardDynamics(nn.Module):
-    def __init__(self, state_dim=6, action_dim=2):
+class HybridForwardDynamics(nn.Module):
+    def __init__(self, hidden_dim=256, L=0.3, dt=0.1):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(state_dim + action_dim, 128), nn.ReLU(),
-            nn.Linear(128, 128), nn.ReLU(),
-            nn.Linear(128, state_dim),
+            nn.Linear(6 + 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 3),  # predict Δv, Δθ, and maybe noise term
         )
+        self.L = L
+        self.dt = dt
+
     def forward(self, s, a):
-        return s + self.net(torch.cat([s, a], dim=-1))
+        x, y, vx, vy, sin_t, cos_t = torch.split(s, 1, dim=-1)
+        theta = torch.atan2(sin_t, cos_t)
+
+        dv, dtheta, _ = torch.split(self.net(torch.cat([s, a], dim=-1)), 1, dim=-1)
+
+        v = torch.sqrt(vx**2 + vy**2 + 1e-6)
+        v_next = v + dv
+        theta_next = theta + dtheta
+
+        x_next = x + v_next * torch.cos(theta_next) * self.dt
+        y_next = y + v_next * torch.sin(theta_next) * self.dt
+
+        vx_next = v_next * torch.cos(theta_next)
+        vy_next = v_next * torch.sin(theta_next)
+        sin_next = torch.sin(theta_next)
+        cos_next = torch.cos(theta_next)
+
+        s_next = torch.cat([x_next, y_next, vx_next, vy_next, sin_next, cos_next], dim=-1)
+        return s_next

@@ -4,7 +4,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch import nn
 from config import buffer_file, batch_size, epochs, lr, state_dim, action_dim, device, models_dir, seed
 from utils import load_buffer, set_seed
-from models import ForwardDynamics
+from models import HybridForwardDynamics
 
 class StateDataset(Dataset):
     def __init__(self, obs, actions, next_obs):
@@ -25,7 +25,7 @@ if __name__ == '__main__':
     obs, acts, obs2 = load_buffer(buffer_file)
     loader = DataLoader(StateDataset(obs, acts, obs2), batch_size=batch_size, shuffle=True, drop_last=True)
 
-    fwd = ForwardDynamics(state_dim=state_dim, action_dim=action_dim).to(device)
+    fwd = HybridForwardDynamics().to(device)
     opt = torch.optim.Adam(fwd.parameters(), lr=lr, weight_decay=1e-5)
     mse = nn.MSELoss()
 

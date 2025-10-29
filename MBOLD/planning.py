@@ -5,7 +5,9 @@ def angular_cost(s_sin, s_cos, g_sin, g_cos):
     return 1.0 - (s_sin * g_sin + s_cos * g_cos)
 
 
-def evaluate_sequences_state(fwd, sequences, s0, sg, device, action_pen=0.01, smooth_pen=0.05):
+def evaluate_sequences_state(fwd, sequences, s0, sg, device,
+                             pos_w=3.0, head_w=0.5, speed_w=0.1,
+                             action_pen=0.005, smooth_pen=0.01):
     pop, H, act_dim = sequences.shape
     s = torch.tensor(s0, dtype=torch.float32, device=device).unsqueeze(0).repeat(pop, 1)
     sg_t = torch.tensor(sg, dtype=torch.float32, device=device).unsqueeze(0).repeat(pop, 1)
@@ -14,23 +16,22 @@ def evaluate_sequences_state(fwd, sequences, s0, sg, device, action_pen=0.01, sm
     a_prev = torch.zeros(pop, act_dim, device=device)
 
     with torch.no_grad():
-        for t in range(H):  # ✅ Use proper loop variable
-            a_t = seq[:, t, :]  # ✅ Index with t
+        for t in range(H):
+            a_t = seq[:, t, :]
             s = fwd(s, a_t)
 
-            # Cost components
             pos_cost = torch.norm(s[:, :2] - sg_t[:, :2], dim=-1)
             head_cost = angular_cost(s[:, 4], s[:, 5], sg_t[:, 4], sg_t[:, 5])
             speed_cost = torch.norm(s[:, 2:4], dim=-1)
 
-            costs += pos_cost + 0.5 * head_cost + 0.1 * speed_cost
+            costs += pos_w * pos_cost + head_w * head_cost + speed_w * speed_cost
             costs += action_pen * torch.norm(a_t, dim=-1)
             costs += smooth_pen * torch.norm(a_t - a_prev, dim=-1)
             a_prev = a_t
 
         # Final state cost
-        costs += 2.0 * torch.norm(s[:, :2] - sg_t[:, :2], dim=-1) + 1.0 * angular_cost(s[:, 4], s[:, 5], sg_t[:, 4],
-                                                                                       sg_t[:, 5])
+        costs += 5.0 * torch.norm(s[:, :2] - sg_t[:, :2], dim=-1)
+        costs += 2.0 * angular_cost(s[:, 4], s[:, 5], sg_t[:, 4], sg_t[:, 5])
 
     return costs.cpu().numpy()
 class CEMPlannerState:
@@ -65,4 +66,4 @@ def success_state(s, sg):
     head_dot = s[4]*sg[4] + s[5]*sg[5]
     ang_cost = 1.0 - head_dot
     speed = np.linalg.norm(s[2:4])
-    return (pos_err < 0.5) and (ang_cost < 0.015) and (speed < 0.1)
+    return (pos_err < 0.5) and (ang_cost < 0.015) #and (speed < 0.1)

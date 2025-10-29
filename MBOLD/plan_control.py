@@ -2,32 +2,15 @@ import os
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
-from config import device, planning_horizon, cem_iters, cem_pop, cem_elite_frac, seed, models_dir
+from config import device, planning_horizon, cem_iters, cem_pop, cem_elite_frac, seed, models_dir, FIXED_ACCEL
 from env_utils import make_env, obs_to_state
-from models import ForwardDynamics
+from models import HybridForwardDynamics
 from planning import CEMPlannerState, success_state
 
 
 def debug_parking_environment(env):
-    """Debug parking environment specifics"""
-    print("\n=== PARKING ENVIRONMENT DEBUG ===")
-
     # Get environment info
-    obs, info = env.reset()
-    print(f"Initial observation: {obs}")
-    print(f"Environment info: {info}")
-
-    # Check environment config
-    if hasattr(env.unwrapped, 'config'):
-        print(f"Environment config: {env.unwrapped.config}")
-
-    # Get state
-    s = obs_to_state(obs)
-    print(f"Initial state: {s}")
-    print(f"Initial position: [{s[0]:.3f}, {s[1]:.3f}]")
-    print(f"Initial velocity: [{s[2]:.3f}, {s[3]:.3f}]")
-    print(f"Initial heading: [{s[4]:.3f}, {s[5]:.3f}] (sin, cos)")
-
+    env.reset()
     # Test different actions to see movement scale
     print("\n--- Testing Action Effects ---")
     test_actions = [
@@ -53,11 +36,10 @@ def debug_parking_environment(env):
 
 def create_better_goal_state(env):
     """Create goal state with environment understanding"""
-    print("\n=== CREATING BETTER GOAL STATE ===")
     obs, _ = env.reset()
 
     sequence = [
-        [-0.2, 0.3],  # More conservative actions
+        [-0.2, 0.3],
         [-0.2, 0.3],
         [0.3, 0.2],
         [0.3, 0.2],
@@ -66,25 +48,21 @@ def create_better_goal_state(env):
         [0.0, 0.0],
         [0.0, 0.0],
     ]
+    for _ in range(20):
+        a = np.array([0.2, 0.3])
+        obs, _, _, _, _ = env.step(a)
+        s = obs_to_state(obs)
+        print(s[:2])
 
-    print("Executing goal sequence:")
-    valid_goal = False
     for i, a in enumerate(sequence):
         obs, _, terminated, truncated, info = env.step(a)
         state = obs_to_state(obs)
         print(f"  Step {i + 1}: action={a}, pos=[{state[0]:.3f}, {state[1]:.3f}]")
-
         if terminated:
-            print(f"  Terminated at step {i + 1}: {info}")
-            valid_goal = 'success' in info and info['success']
             break
         if truncated:
-            print(f"  Truncated at step {i + 1}")
             break
-
     goal_state = obs_to_state(obs)
-    print(f"Goal generation {'SUCCESS' if valid_goal else 'FAILED'}")
-    print(f"Final goal state: {np.round(goal_state, 3)}")
     return goal_state
 
 
@@ -92,12 +70,6 @@ def run_episode_with_parking_debug(env, planner, sg, episode_num):
     """Run episode with parking-specific debugging"""
     obs, _ = env.reset(seed=seed + episode_num)
     s = obs_to_state(obs)
-
-    print(f'\n=== Episode {episode_num + 1} PARKING DEBUG ===')
-    print(f'Start position: [{s[0]:.3f}, {s[1]:.3f}]')
-    print(f'Goal position:  [{sg[0]:.3f}, {sg[1]:.3f}]')
-    print(f'Distance: {np.linalg.norm(s[:2] - sg[:2]):.4f}')
-
     trajectory = []
     actions_taken = []
     distances = []
@@ -117,16 +89,11 @@ def run_episode_with_parking_debug(env, planner, sg, episode_num):
             break
 
         # Plan action
-        a = planner.plan(s, sg, horizon=planning_horizon, iters=cem_iters,
+        planned_action  = planner.plan(s, sg, horizon=planning_horizon, iters=cem_iters,
                          pop=cem_pop, elite_frac=cem_elite_frac, device=device)
-
-
-        if distance > 1.0:
-            a = a * 1.5  # Medium boost for far distances
-        elif distance > 0.5:
-            a = a * 1.0  # Normal actions
-        else:
-            a = a * 0.5  # Careful actions when close
+        planned_steering = planned_action[0]
+        a = np.array([planned_steering, FIXED_ACCEL])
+        obs, _, terminated, truncated, _ = env.step(a)
 
         a = np.clip(a, env.action_space.low, env.action_space.high)
         actions_taken.append(a.copy())
@@ -223,7 +190,7 @@ if __name__ == '__main__':
     debug_parking_environment(env)
 
     print('Loading dynamics model...')
-    fwd = ForwardDynamics().to(device)
+    fwd = HybridForwardDynamics().to(device)
     model_path = os.path.join(models_dir, 'fwd_state.pth')
     fwd.load_state_dict(torch.load(model_path, map_location=device))
     fwd.eval()
