@@ -18,7 +18,7 @@ def evaluate_sequences_state(fwd, sequences, s0, sg, device,
     with torch.no_grad():
         for t in range(H):
             a_t = seq[:, t, :]
-            s = fwd(s, a_t)
+            s = fwd(s, sg_t, a_t)
 
             pos_cost = torch.norm(s[:, :2] - sg_t[:, :2], dim=-1)
             head_cost = angular_cost(s[:, 4], s[:, 5], sg_t[:, 4], sg_t[:, 5])
@@ -61,9 +61,18 @@ class CEMPlannerState:
         self.prev_solution = mean
         return mean[0]
 
-def success_state(s, sg):
+
+def success_state(s, sg, pos_thresh=0.05, head_thresh=0.05, speed_thresh=0.1):
+    """
+    sg: goal state
+    """
     pos_err = np.linalg.norm(s[:2] - sg[:2])
-    head_dot = s[4]*sg[4] + s[5]*sg[5]
-    ang_cost = 1.0 - head_dot
+
+    theta_s = np.arctan2(s[4], s[5])
+    theta_g = np.arctan2(sg[4], sg[5])
+    ang_err = np.abs(np.arctan2(np.sin(theta_s - theta_g), np.cos(theta_s - theta_g)))
+
     speed = np.linalg.norm(s[2:4])
-    return (pos_err < 0.5) and (ang_cost < 0.015) #and (speed < 0.1)
+
+    return (pos_err < pos_thresh) and (ang_err < head_thresh) and (speed < speed_thresh)
+

@@ -2,7 +2,7 @@ import os
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
-from config import device, planning_horizon, cem_iters, cem_pop, cem_elite_frac, seed, models_dir, FIXED_ACCEL
+from config import device, planning_horizon, cem_iters, cem_pop, cem_elite_frac, seed, models_dir
 from env_utils import make_env, obs_to_state
 from models import HybridForwardDynamics
 from planning import CEMPlannerState, success_state
@@ -23,10 +23,10 @@ def debug_parking_environment(env):
     for i, action in enumerate(test_actions):
         env.reset()
         obs_before, _ = env.reset()
-        s_before = obs_to_state(obs_before)
+        s_before = obs_to_state(obs_before['observation'])
 
         obs_after, _, _, _, _ = env.step(np.array(action))
-        s_after = obs_to_state(obs_after)
+        s_after = obs_to_state(obs_after['observation'])
 
         pos_change = np.linalg.norm(s_after[:2] - s_before[:2])
         vel_change = np.linalg.norm(s_after[2:4] - s_before[2:4])
@@ -51,25 +51,25 @@ def create_better_goal_state(env):
     for _ in range(20):
         a = np.array([0.2, 0.3])
         obs, _, _, _, _ = env.step(a)
-        s = obs_to_state(obs)
+        s = obs_to_state(obs['observation'])
         print(s[:2])
 
     for i, a in enumerate(sequence):
         obs, _, terminated, truncated, info = env.step(a)
-        state = obs_to_state(obs)
+        state = obs_to_state(obs['observation'])
         print(f"  Step {i + 1}: action={a}, pos=[{state[0]:.3f}, {state[1]:.3f}]")
         if terminated:
             break
         if truncated:
             break
-    goal_state = obs_to_state(obs)
+    goal_state = obs_to_state(obs['observation'])
     return goal_state
 
 
 def run_episode_with_parking_debug(env, planner, sg, episode_num):
     """Run episode with parking-specific debugging"""
     obs, _ = env.reset(seed=seed + episode_num)
-    s = obs_to_state(obs)
+    s = obs_to_state(obs['observation'])
     trajectory = []
     actions_taken = []
     distances = []
@@ -92,7 +92,8 @@ def run_episode_with_parking_debug(env, planner, sg, episode_num):
         planned_action  = planner.plan(s, sg, horizon=planning_horizon, iters=cem_iters,
                          pop=cem_pop, elite_frac=cem_elite_frac, device=device)
         planned_steering = planned_action[0]
-        a = np.array([planned_steering, FIXED_ACCEL])
+        accel = np.random.uniform(env.action_space.low[1], env.action_space.high[1])
+        a = np.array([planned_steering, accel])
         obs, _, terminated, truncated, _ = env.step(a)
 
         a = np.clip(a, env.action_space.low, env.action_space.high)
@@ -100,7 +101,7 @@ def run_episode_with_parking_debug(env, planner, sg, episode_num):
 
         # Execute action
         obs, _, terminated, truncated, info = env.step(a)
-        s = obs_to_state(obs)
+        s = obs_to_state(obs['observation'])
 
         # Debug output
         if t % 20 == 0 or distance < 0.1:
@@ -166,7 +167,7 @@ def run_episode_with_parking_debug(env, planner, sg, episode_num):
         ax3.grid(True, alpha=0.3)
 
     # 4. Velocity profile
-    velocities = [np.linalg.norm(pos[2:4]) for pos in [obs_to_state(env.reset()[0])]]  # اینو بهتر implement کن
+    velocities = [np.linalg.norm(pos[2:4]) for pos in [obs_to_state(env.reset()[0]['observation'])]]
     ax4.set_title('Velocity Profile (placeholder)')
     ax4.text(0.5, 0.5, 'Velocity data needs\nproper implementation',
              ha='center', va='center', transform=ax4.transAxes)

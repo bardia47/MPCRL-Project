@@ -6,7 +6,7 @@ from highway_env.vehicle.kinematics import Vehicle
 
 class SimpleParkingNoLaneEnv(ParkingEnv):
 
-    def _create_road(self, spots: int = 14) -> None:
+    def _create_road(self, spots: int = 4) -> None:
         """
         Create a road composed of straight adjacent lanes.
 

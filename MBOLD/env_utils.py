@@ -13,11 +13,14 @@ def make_env(render= False):
     env = gym.make('SimpleParkingNoLane-v0') if not render else gym.make('SimpleParkingNoLane-v0', render_mode='human')
     env.unwrapped.configure({
         'action_type': 'ContinuousAction',
-        'simulation_frequency': 15,
+        'simulation_frequency': 5,
+        'policy_frequency': 5,
         'observation': {
-            'type': 'Kinematics',
-            'features': ['x', 'y', 'vx', 'vy', 'heading'],
+            'type': 'KinematicsGoal',
+            "features": ['x', 'y', 'vx', 'vy', 'cos_h', 'sin_h'],
             'absolute': True,
+            "scales": [100, 100, 5, 5, 1, 1],
+
             'normalize': False,
             'vehicles_count': 1
         },
@@ -31,7 +34,5 @@ def make_env(render= False):
 def obs_to_state(obs):
     arr = np.asarray(obs, dtype=np.float32)
     v = arr[0] if arr.ndim == 2 else arr
-    if v.shape[0] != 5:
-        raise ValueError(f'Expected 5 features, got shape {v.shape}')
-    x, y, vx, vy, heading = v
-    return np.array([x, y, vx, vy, np.sin(heading), np.cos(heading)], dtype=np.float32)
+    x, y, vx, vy, sin,cos = v
+    return np.array([x, y, vx, vy, sin,cos], dtype=np.float32)
