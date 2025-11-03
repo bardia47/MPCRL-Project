@@ -70,17 +70,25 @@ def run_episode_with_parking_debug(env, planner, sg, episode_num):
     """Run episode with parking-specific debugging"""
     obs, _ = env.reset(seed=seed + episode_num)
     s = obs_to_state(obs['observation'])
+
+    # NEW: Lists to store the complete data
     trajectory = []
     actions_taken = []
     distances = []
+    speeds = []  # NEW: List to store speed at each step
+
     planner.prev_solution = None
     success = False
 
     for t in range(150):  # More steps for parking
         # Record current state
-        trajectory.append(s[:2].copy())
+        trajectory.append(s.copy())  # NEW: Store the full state, not just s[:2]
         distance = np.linalg.norm(s[:2] - sg[:2])
         distances.append(distance)
+
+        # NEW: Calculate and store speed
+        speed = np.linalg.norm(s[2:4])
+        speeds.append(speed)
 
         # Check success
         if success_state(s, sg):
@@ -89,12 +97,8 @@ def run_episode_with_parking_debug(env, planner, sg, episode_num):
             break
 
         # Plan action
-        planned_action  = planner.plan(s, sg, horizon=planning_horizon, iters=cem_iters,
+        a = planner.plan(s, sg, horizon=planning_horizon, iters=cem_iters,
                          pop=cem_pop, elite_frac=cem_elite_frac, device=device)
-        planned_steering = planned_action[0]
-        accel = np.random.uniform(env.action_space.low[1], env.action_space.high[1])
-        a = np.array([planned_steering, accel])
-        obs, _, terminated, truncated, _ = env.step(a)
 
         a = np.clip(a, env.action_space.low, env.action_space.high)
         actions_taken.append(a.copy())
@@ -106,7 +110,8 @@ def run_episode_with_parking_debug(env, planner, sg, episode_num):
         # Debug output
         if t % 20 == 0 or distance < 0.1:
             print(f"Step {t:3d}: pos=[{s[0]:.3f}, {s[1]:.3f}], "
-                  f"dist={distance:.4f}, action=[{a[0]:.3f}, {a[1]:.3f}]")
+                  f"dist={distance:.4f}, action=[{a[0]:.3f}, {a[1]:.3f}], "
+                  f"speed={speed:.3f}")  # NEW: Display speed in the log
 
         # Check termination
         if terminated or truncated:
@@ -117,20 +122,36 @@ def run_episode_with_parking_debug(env, planner, sg, episode_num):
                 print(f'Episode terminated: {info}')
             break
 
-    # Enhanced plotting
+    # --- Corrected Plotting Section ---
+
+    # NEW: Convert all lists to NumPy arrays
+    # (Note: trajectory is now (N, 6), not (N, 2))
     trajectory = np.array(trajectory)
     actions_taken = np.array(actions_taken)
     distances = np.array(distances)
+    speeds = np.array(speeds)  # NEW
 
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
 
     # 1. Trajectory plot
-    ax1.plot(trajectory[:, 0], trajectory[:, 1], 'b-', linewidth=2, alpha=0.7)
-    ax1.scatter(trajectory[0, 0], trajectory[0, 1], color='green', s=150,
-                marker='s', label='Start', zorder=5)
-    ax1.scatter(sg[0], sg[1], color='red', s=200, marker='*', label='Goal', zorder=5)
+    if len(trajectory) > 0:
+        ax1.plot(trajectory[:, 0], trajectory[:, 1], 'b-', linewidth=2, alpha=0.7, label='Trajectory')
+        ax1.scatter(trajectory[0, 0], trajectory[0, 1], color='green', s=150,
+                    marker='s', label='Start', zorder=5)
 
-    # Add distance circles
+    # NEW: Plot the Goal with its Heading
+    # Plot goal position (star)
+    ax1.scatter(sg[0], sg[1], color='red', s=200, marker='*', label='Goal Position', zorder=5)
+
+    # NEW: Plot goal heading (arrow)
+    # sg[5] -> cos(theta_g), sg[4] -> sin(theta_g)
+    arrow_len = 0.25  # Length of the arrow for display
+    goal_dx = arrow_len * sg[5]  # U component (Cosine)
+    goal_dy = arrow_len * sg[4]  # V component (Sine)
+    ax1.quiver(sg[0], sg[1], goal_dx, goal_dy,
+               color='red', scale=1, scale_units='xy', angles='xy', zorder=6,
+               width=0.007, label='Goal Heading')
+
     circles = [0.1, 0.5, 1.0]
     for r in circles:
         circle = plt.Circle((sg[0], sg[1]), r, fill=False, alpha=0.3,
@@ -166,18 +187,24 @@ def run_episode_with_parking_debug(env, planner, sg, episode_num):
         ax3.legend()
         ax3.grid(True, alpha=0.3)
 
-    # 4. Velocity profile
-    velocities = [np.linalg.norm(pos[2:4]) for pos in [obs_to_state(env.reset()[0]['observation'])]]
-    ax4.set_title('Velocity Profile (placeholder)')
-    ax4.text(0.5, 0.5, 'Velocity data needs\nproper implementation',
-             ha='center', va='center', transform=ax4.transAxes)
+    # 4. Velocity profile (NEW: Plotting speed)
+    if len(speeds) > 0:
+        ax4.plot(speeds, 'm-', linewidth=2, label='Speed (m/s)')  # 'm' for magenta
+        ax4.set_xlabel('Step')
+        ax4.set_ylabel('Speed (m/s)')
+        ax4.set_title('Velocity Profile')
+        ax4.grid(True, alpha=0.3)
+        ax4.legend()
+    else:
+        ax4.set_title('Velocity Profile (No data)')
+        ax4.text(0.5, 0.5, 'No velocity data collected',
+                 ha='center', va='center', transform=ax4.transAxes)
 
     plt.tight_layout()
     plt.savefig(f'parking_debug_{episode_num + 1}.png', dpi=150, bbox_inches='tight')
     plt.show()
 
     return success
-
 
 if __name__ == '__main__':
     print('Setting up parking environment...')

@@ -1,24 +1,45 @@
+#
+# collect_data.py
+#
+import numpy as np
 from config import num_episodes, max_episode_steps, buffer_file, seed
 from env_utils import make_env, obs_to_state
-from utils import save_buffer, set_seed
-import numpy as np
-import random
+from utils import save_buffer
 
-
-def collect_random_data_with_HER(env, num_episodes, max_steps, her_ratio=0.8):
-    """Collect random rollouts and augment them with Hindsight Experience Replay (HER)."""
-    all_obs, all_goals, all_actions, all_next_obs, all_next_goals = [], [], [], [], []
+import multiprocessing as mp
+import os
+import time
+from tqdm import tqdm
+def collect_smart_data_with_HER(env, num_episodes, max_steps, her_ratio=0.8,
+                                success_boost=5, action_repeat=4, worker_seed=None):
+    """
+    Collect rollouts with HER, action repeat, and biased sampling for braking.
+    """
+    all_obs, all_goals, all_actions, all_next_obs, all_success_flags = [], [], [], [], []
+    a = np.zeros(env.action_space.shape[0], dtype=np.float32)
 
     for ep in range(num_episodes):
-        obs, info = env.reset()
+        ep_seed = worker_seed + ep if worker_seed is not None else None
+        obs, info = env.reset(seed=ep_seed)
+
         episode_transitions = []
-        for _ in range(max_steps):
-            steering = np.random.uniform(low=-1, high=1)
-            accel = np.random.uniform(low=-1, high=1)
-            a = np.array([steering, accel], dtype=np.float32)
+        success = False
 
-            obs_next, _, terminated, truncated, _ = env.step(a)
+        for step in range(max_steps):
+            if step % action_repeat == 0:
+                steering = np.random.uniform(-1, 1)
+                rand_val = np.random.rand()
+                if rand_val < 0.2:
+                    accel = -1.0
+                elif rand_val < 0.4:
+                    accel = 1.0
+                elif rand_val < 0.5:
+                    accel = 0.0
+                else:
+                    accel = np.random.uniform(-1, 1)
+                a = np.array([steering, accel], dtype=np.float32)
 
+            obs_next, _, terminated, truncated, info = env.step(a)
             transition = {
                 "obs": obs_to_state(obs["observation"]),
                 "goal": obs["desired_goal"],
@@ -27,43 +48,102 @@ def collect_random_data_with_HER(env, num_episodes, max_steps, her_ratio=0.8):
                 "achieved_goal": obs_next["achieved_goal"],
             }
             episode_transitions.append(transition)
-
             obs = obs_next
             if terminated or truncated:
+                success = info.get("is_success", False)
                 break
 
+        repeat_factor = success_boost if success else 1
+        n_trans = len(episode_transitions)
+
         for i, trans in enumerate(episode_transitions):
-            remaining = len(episode_transitions) - i
-            sample_size = min(2, remaining)
-            future_idxs = np.random.choice(range(i, len(episode_transitions)), size=sample_size, replace=False)
-
-            for idx in future_idxs:
-                her_goal = episode_transitions[idx]["achieved_goal"]
-
+            # 1. Original goal
+            for _ in range(repeat_factor):
                 all_obs.append(trans["obs"])
                 all_goals.append(trans["goal"])
                 all_actions.append(trans["action"])
                 all_next_obs.append(trans["next_obs"])
-                all_next_goals.append(trans["goal"])
+                all_success_flags.append(int(success))
 
-                all_obs.append(trans["obs"])
-                all_goals.append(her_goal)
-                all_actions.append(trans["action"])
-                all_next_obs.append(trans["next_obs"])
-                all_next_goals.append(her_goal)
+            # 2. HER goals
+            n_her = int(her_ratio * 2)
+            future_idxs = np.random.choice(range(i, n_trans), size=min(n_her, n_trans - i), replace=False)
+            for idx in future_idxs:
+                her_goal = episode_transitions[idx]["achieved_goal"]
+                for _ in range(repeat_factor):
+                    all_obs.append(trans["obs"])
+                    all_goals.append(her_goal)
+                    all_actions.append(trans["action"])
+                    all_next_obs.append(trans["next_obs"])
+                    all_success_flags.append(int(success))
 
-    return all_obs, all_goals, all_actions, all_next_obs, all_next_goals
+    return all_obs, all_goals, all_actions, all_next_obs, all_success_flags
+
+
+# --- Wrapper function for parallel execution ---
+def collect_worker(worker_id, num_episodes_per_worker, worker_seed):
+    """
+    A wrapper function that creates its own environment
+    and calls the collection function.
+    """
+    env = make_env(render=False)
+
+    data = collect_smart_data_with_HER(
+        env, num_episodes_per_worker, max_episode_steps,
+        her_ratio=0.8, success_boost=5, action_repeat=4,
+        worker_seed=worker_seed
+    )
+
+    env.close()
+    return data
+
+
+def collect_worker_star(args):
+    """ Helper function to unpack arguments for pool.imap_unordered """
+    return collect_worker(*args)
 
 
 if __name__ == "__main__":
-    set_seed(seed)
-    env = make_env(render=True)
+    start_time = time.time()
 
-    print(f"Collecting HER data from {env.unwrapped.spec.name} ...")
-    obs, goals, acts, obs2, goals2 = collect_random_data_with_HER(
-        env, num_episodes, max_episode_steps, her_ratio=0.8
-    )
+    num_workers = max(1, os.cpu_count() - 1)
+    total_episodes = num_episodes
+    episodes_per_worker = total_episodes // num_workers
+    remainder_episodes = total_episodes % num_workers
 
-    print(f"Saving {len(obs)} samples to {buffer_file} ...")
-    save_buffer(buffer_file, obs, goals, acts, obs2, goals2)
-    env.close()
+    worker_args = []
+    current_seed = seed
+    for i in range(num_workers):
+        eps_to_run = episodes_per_worker
+        if i < remainder_episodes:
+            eps_to_run += 1
+
+        worker_args.append((i, eps_to_run, current_seed))
+        current_seed += eps_to_run
+
+    print(f"Starting {num_workers} workers to collect {total_episodes} total episodes...")
+
+    results = []
+    with mp.Pool(processes=num_workers) as pool:
+        pbar = tqdm(pool.imap_unordered(collect_worker_star, worker_args), total=len(worker_args),
+                    desc="Collecting Data")
+        for result in pbar:
+            results.append(result)
+
+    print("All workers finished. Concatenating results...")
+
+    # --- Concatenate Results ---
+    final_obs, final_goals, final_acts, final_obs2, final_success = [], [], [], [], []
+
+    for (obs, goals, acts, obs2, success_flags) in results:
+        final_obs.extend(obs)
+        final_goals.extend(goals)
+        final_acts.extend(acts)
+        final_obs2.extend(obs2)
+        final_success.extend(success_flags)
+
+    print(f"Saving {len(final_obs)} total samples to {buffer_file} ...")
+    save_buffer(buffer_file, final_obs, final_goals, final_acts, final_obs2, final_success)
+
+    end_time = time.time()
+    print(f"Done. Total time: {end_time - start_time:.2f} seconds")

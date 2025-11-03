@@ -6,8 +6,13 @@ def angular_cost(s_sin, s_cos, g_sin, g_cos):
 
 
 def evaluate_sequences_state(fwd, sequences, s0, sg, device,
-                             pos_w=3.0, head_w=0.5, speed_w=0.1,
-                             action_pen=0.005, smooth_pen=0.01):
+                             pos_w=1.0,
+                             head_w=0.1,
+                             action_pen=0.005,
+                             smooth_pen=0.1,
+                             final_pos_w=10.0,
+                             final_head_w=15.0,
+                             final_speed_w=40.0):
     pop, H, act_dim = sequences.shape
     s = torch.tensor(s0, dtype=torch.float32, device=device).unsqueeze(0).repeat(pop, 1)
     sg_t = torch.tensor(sg, dtype=torch.float32, device=device).unsqueeze(0).repeat(pop, 1)
@@ -18,20 +23,21 @@ def evaluate_sequences_state(fwd, sequences, s0, sg, device,
     with torch.no_grad():
         for t in range(H):
             a_t = seq[:, t, :]
-            s = fwd(s, sg_t, a_t)
+            s = fwd(s, a_t)
 
             pos_cost = torch.norm(s[:, :2] - sg_t[:, :2], dim=-1)
             head_cost = angular_cost(s[:, 4], s[:, 5], sg_t[:, 4], sg_t[:, 5])
-            speed_cost = torch.norm(s[:, 2:4], dim=-1)
 
-            costs += pos_w * pos_cost + head_w * head_cost + speed_w * speed_cost
+            costs += pos_w * pos_cost + head_w * head_cost
+
             costs += action_pen * torch.norm(a_t, dim=-1)
             costs += smooth_pen * torch.norm(a_t - a_prev, dim=-1)
             a_prev = a_t
+        costs += final_pos_w * torch.norm(s[:, :2] - sg_t[:, :2], dim=-1)
+        costs += final_head_w * angular_cost(s[:, 4], s[:, 5], sg_t[:, 4], sg_t[:, 5])
 
-        # Final state cost
-        costs += 5.0 * torch.norm(s[:, :2] - sg_t[:, :2], dim=-1)
-        costs += 2.0 * angular_cost(s[:, 4], s[:, 5], sg_t[:, 4], sg_t[:, 5])
+        final_speed_cost = torch.norm(s[:, 2:4], dim=-1)
+        costs += final_speed_w * final_speed_cost
 
     return costs.cpu().numpy()
 class CEMPlannerState:

@@ -12,8 +12,8 @@ os.makedirs(models_dir, exist_ok=True)
 buffer_file = os.path.join(data_dir, 'parking_kinematics.npz')
 
 # data collection
-num_episodes = 400
-max_episode_steps = 150
+num_episodes = 2000
+max_episode_steps = 200
 
 # training
 state_dim = 6
@@ -23,9 +23,9 @@ epochs = 100
 lr = 5e-4
 
 # planning
-planning_horizon = 40
+planning_horizon = 60
 cem_iters = 10
-cem_pop = 1024
+cem_pop = 2048
 cem_elite_frac = 0.1
 
 
