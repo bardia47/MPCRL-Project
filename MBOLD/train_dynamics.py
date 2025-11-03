@@ -4,7 +4,7 @@ from torch.utils.data import Dataset, DataLoader, TensorDataset
 from torch import nn
 from config import buffer_file, batch_size, epochs, lr, state_dim, action_dim, device, models_dir, seed
 from utils import load_buffer
-from models import HybridForwardDynamics
+from models import ResidualDynamics
 from tqdm import tqdm
 if __name__ == '__main__':
     print(f"Using device: {device}")
@@ -31,7 +31,7 @@ if __name__ == '__main__':
 
     print("Data loading complete. Starting training...")
 
-    fwd = HybridForwardDynamics().to(device)
+    fwd = ResidualDynamics().to(device)
     opt = torch.optim.Adam(fwd.parameters(), lr=lr, weight_decay=1e-5)
 
     for ep in range(epochs):

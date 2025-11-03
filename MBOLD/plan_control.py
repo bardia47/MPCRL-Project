@@ -4,7 +4,7 @@ import torch
 import matplotlib.pyplot as plt
 from config import device, planning_horizon, cem_iters, cem_pop, cem_elite_frac, seed, models_dir
 from env_utils import make_env, obs_to_state
-from models import HybridForwardDynamics
+from models import ResidualDynamics
 from planning import CEMPlannerState, success_state
 
 
@@ -208,7 +208,7 @@ def run_episode_with_parking_debug(env, planner, sg, episode_num):
 
 if __name__ == '__main__':
     print('Setting up parking environment...')
-    env = make_env(render=True)
+    env = make_env()
     env_goal = make_env()
 
     env.reset(seed=seed)
@@ -218,7 +218,7 @@ if __name__ == '__main__':
     debug_parking_environment(env)
 
     print('Loading dynamics model...')
-    fwd = HybridForwardDynamics().to(device)
+    fwd = ResidualDynamics().to(device)
     model_path = os.path.join(models_dir, 'fwd_state.pth')
     fwd.load_state_dict(torch.load(model_path, map_location=device))
     fwd.eval()

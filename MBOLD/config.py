@@ -25,7 +25,7 @@ lr = 5e-4
 # planning
 planning_horizon = 60
 cem_iters = 10
-cem_pop = 2048
+cem_pop = 4096
 cem_elite_frac = 0.1
 
 
