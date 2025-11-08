@@ -2,7 +2,7 @@ import os
 import torch
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 from torch import nn
-from config import buffer_file, batch_size, epochs, lr, state_dim, action_dim, device, models_dir, seed
+from config import buffer_file, batch_size, epochs, lr, state_dim, action_dim, device, models_dir
 from utils import load_buffer
 from models import ResidualDynamics
 from tqdm import tqdm

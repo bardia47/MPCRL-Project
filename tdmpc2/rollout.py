@@ -16,7 +16,7 @@ CKPT_DIR = "checkpoints"
 
 
 # ---------- Environment ----------
-def make_env(render=True, seed=None):
+def make_env(render=True):
     render_mode = "human" if render else "rgb_array"
     env = gym.make("parking-v0", render_mode=render_mode)
     env.unwrapped.configure({
@@ -31,10 +31,8 @@ def make_env(render=True, seed=None):
         "policy_frequency": 5,
         "offscreen_rendering": not render,
     })
-    if seed is not None:
-        env.reset(seed=seed)
-    else:
-        env.reset()
+
+    env.reset()
     return env
 
 

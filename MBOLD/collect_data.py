@@ -2,7 +2,7 @@
 # collect_data.py
 #
 import numpy as np
-from config import num_episodes, max_episode_steps, buffer_file, seed
+from config import num_episodes, max_episode_steps, buffer_file
 from env_utils import make_env, obs_to_state
 from utils import save_buffer
 
@@ -104,15 +104,15 @@ def collect_worker_star(args):
 
 
 if __name__ == "__main__":
+    from config import seed
     start_time = time.time()
 
     num_workers = max(1, os.cpu_count() - 1)
     total_episodes = num_episodes
     episodes_per_worker = total_episodes // num_workers
     remainder_episodes = total_episodes % num_workers
-
-    worker_args = []
     current_seed = seed
+    worker_args = []
     for i in range(num_workers):
         eps_to_run = episodes_per_worker
         if i < remainder_episodes:
@@ -120,7 +120,6 @@ if __name__ == "__main__":
 
         worker_args.append((i, eps_to_run, current_seed))
         current_seed += eps_to_run
-
     print(f"Starting {num_workers} workers to collect {total_episodes} total episodes...")
 
     results = []

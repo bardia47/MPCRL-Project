@@ -4,13 +4,14 @@ import numpy as np
 from gymnasium.envs.registration import register
 from simple_parking_no_lane_env import SimpleParkingNoLaneEnv
 
-register(
-    id="SimpleParkingNoLane-v0",
-    entry_point="simple_parking_no_lane_env:SimpleParkingNoLaneEnv",
-)
+# register(
+#     id="SimpleParkingNoLane-v0",
+#     entry_point="simple_parking_no_lane_env:SimpleParkingNoLaneEnv",
+# )
 
 def make_env(render= False):
-    env = gym.make('SimpleParkingNoLane-v0') if not render else gym.make('SimpleParkingNoLane-v0', render_mode='human')
+  #  env = gym.make('SimpleParkingNoLane-v0') if not render else gym.make('SimpleParkingNoLane-v0', render_mode='human')
+    env = gym.make('parking-v0') if not render else gym.make('parking-v0', render_mode='human')
     env.unwrapped.configure({
         'action_type': 'ContinuousAction',
         'simulation_frequency': 5,

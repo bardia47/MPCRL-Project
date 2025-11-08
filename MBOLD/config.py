@@ -1,7 +1,6 @@
 import os
 import torch
 
-seed = 42
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 data_dir = 'data'
@@ -13,7 +12,7 @@ buffer_file = os.path.join(data_dir, 'parking_kinematics.npz')
 
 # data collection
 num_episodes = 2000
-max_episode_steps = 200
+max_episode_steps = 100
 
 # training
 state_dim = 6
@@ -21,7 +20,7 @@ action_dim = 2
 batch_size = 256
 epochs = 100
 lr = 5e-4
-
+seed = 3
 # planning
 planning_horizon = 60
 cem_iters = 10

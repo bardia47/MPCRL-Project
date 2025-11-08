@@ -8,7 +8,7 @@ def save_buffer(path, observations, goals, actions, next_observations,success_fl
                         goals=np.array(goals, dtype=np.float32),
                         actions=np.array(actions, dtype=np.float32),
                         next_observations=np.array(next_observations, dtype=np.float32),
-                        success_flags=np.array(success_flags, dtype=np.bool))
+                        success_flags=np.array(success_flags, dtype=bool))
 
 def load_buffer(path):
     d = np.load(path)
